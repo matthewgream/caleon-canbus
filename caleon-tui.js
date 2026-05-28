@@ -117,16 +117,18 @@ const fmtVal = (v, suffix = '', width = 7) => {
 function render() {
   /* rooms */
   let lines = [];
-  lines.push('{bold}{white-fg} idx rt   name              temp     set   sw   hum   age{/}{/bold}');
+  lines.push('{bold}{white-fg} idx rt   name              temp     set   mode      hum   age{/}{/bold}');
   for (const r of roomEntries) {
     const s = state.rooms.get(r.key) || {};
     const ageT = ageStr(s.t_temp || s.t_tset || s.t_sw || s.t_hum);
+    const modeCell = s.swval == null ? '   --   '
+                   : (s.swmode || `?(${s.swval})`).padEnd(8);
     lines.push(
       ` ${String(r.ridx).padStart(2)}  ${String(r.rtyp).padStart(2)} ` +
       ` {yellow-fg}${(r.name || '').padEnd(14)}{/yellow-fg}` +
       ` ${fmtVal(s.temp,    '°C')}` +
       ` ${fmtVal(s.tset,    '°C')}` +
-      ` ${(s.swval ?? '--').toString().padStart(4)}` +
+      ` ${modeCell}` +
       ` ${fmtVal(s.humidity, '%', 5)}` +
       `  ${ageT}`
     );
@@ -170,32 +172,35 @@ function render() {
   }
   devBox.setContent(lines.join('\n'));
 
-  /* relays */
+  /* relays -- bytes 4-7 are state-related but we don't yet know which is on/off,
+   * so display all four so the user can spot which one moves first. */
   lines = [];
-  lines.push('{bold}{white-fg}  no  name      mode   value    age{/}{/bold}');
+  lines.push('{bold}{white-fg}  no  name     label flag  extra(4..7)  age{/}{/bold}');
   for (const [no, r] of [...state.relays.entries()].sort((a,b) => a[0]-b[0])) {
     const nm = (cfg.hc_relays && (cfg.hc_relays[`0x${no.toString(16).padStart(2,'0').toUpperCase()}`] || cfg.hc_relays[`0x${no.toString(16).padStart(2,'0')}`] || cfg.hc_relays[String(no)])) || '';
-    const unit = r.unit || '';
+    const extra = (r.extra || []).map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ').padEnd(11);
+    const allZero = (r.extra || []).every(b => b === 0);
+    const extraStyled = allZero ? `{gray-fg}${extra}{/}` : `{yellow-fg}${extra}{/}`;
     lines.push(
-      `  ${String(no).padStart(2)}  ${nm.padEnd(8)}  ` +
-      `0x${(r.mode ?? 0).toString(16).padStart(2,'0').toUpperCase()}` +
-      ` ${String(r.value ?? r.value_raw ?? '--').padStart(5)}${unit.padEnd(2)}` +
-      `  ${ageStr(r.ts)}`
+      `  ${String(no).padStart(2)}  ${nm.padEnd(8)} ` +
+      ` "${(r.label||'').padEnd(2)}"  ` +
+      `0x${(r.flag ?? 0).toString(16).padStart(2,'0').toUpperCase()}  ` +
+      `${extraStyled}  ${ageStr(r.ts)}`
     );
   }
   relayBox.setContent(lines.join('\n'));
 
   /* sensors */
   lines = [];
-  lines.push('{bold}{white-fg}  no  name      type  raw       val       age{/}{/bold}');
+  lines.push('{bold}{white-fg}  no  name      kind         raw      value     age{/}{/bold}');
   for (const [no, s] of [...state.sensors.entries()].sort((a,b) => a[0]-b[0])) {
     const nm = (cfg.hc_sensors && (cfg.hc_sensors[`0x${no.toString(16).padStart(2,'0').toUpperCase()}`] || cfg.hc_sensors[`0x${no.toString(16).padStart(2,'0')}`] || cfg.hc_sensors[String(no)])) || '';
-    const valCell = (s.present === false || s.value === null || s.value === undefined)
-        ? '{gray-fg}    --   {/}'
-        : `${String(s.value).padStart(8)} `;
+    const absent = (s.present === false || s.value === null || s.value === undefined);
+    const kind = absent ? '{gray-fg}(absent)    {/}' : (s.type_name || '?').padEnd(12);
+    const valCell = absent ? '{gray-fg}    --   {/}'
+                           : `${String(s.value).padStart(6)} ${(s.unit||'').padEnd(4)}`;
     lines.push(
-      `  ${String(no).padStart(2)}  ${nm.padEnd(8)}  ` +
-      `0x${(s.type ?? 0).toString(16).padStart(2,'0').toUpperCase()}` +
+      `  ${String(no).padStart(2)}  ${nm.padEnd(8)}  ${kind}` +
       `  ${String(s.value_raw ?? '--').padStart(6)}` +
       `  ${valCell}  ${ageStr(s.ts)}`
     );
@@ -269,15 +274,21 @@ mqttClient.on('message', (topic, buf) => {
       if (m.function === 'ecsRcTroom')    { s.temp     = present ? m.value : null;     s.t_temp = tstamp; }
       if (m.function === 'ecsRcTset')     { s.tset     = present ? m.value : null;     s.t_tset = tstamp; }
       if (m.function === 'ecsRcHumidity') { s.humidity = present ? m.value : null;     s.t_hum  = tstamp; }
-      if (m.function === 'ecsRcSwitch')   { s.swval    = present ? m.value_raw : null; s.t_sw   = tstamp; }
+      if (m.function === 'ecsRcSwitch')   {
+        s.swval = present ? m.value_raw : null;
+        s.swmode = (present && m.mode_name) ? m.mode_name : null;
+        s.t_sw = tstamp;
+      }
       state.rooms.set(key, s);
     }
   } else if (t === 'hc_relay') {
-    state.relays.set(m.relay_no, { mode: m.mode, value_raw: m.value_raw,
-                                    value: m.value, unit: m.unit, ts: tstamp });
+    state.relays.set(m.relay_no, { flag: m.flag, label: m.label || '',
+                                    extra: m.extra || [], ts: tstamp });
   } else if (t === 'hc_sensor') {
     const present = m.present !== false && m.value !== null;
     state.sensors.set(m.sensor_no, { type: m.sensor_type,
+                                     type_name: m.sensor_type_name || '',
+                                     unit: m.unit || '',
                                      value: present ? m.value : null,
                                      value_raw: m.value_raw,
                                      present, ts: tstamp });

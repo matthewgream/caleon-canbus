@@ -257,7 +257,9 @@ static int can_open(const char *iface) {
     if (s < 0) { perror("socket(PF_CAN)"); return -1; }
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    /* snprintf truncates safely and always NUL-terminates -- avoids the
+     * gcc -Wstringop-truncation noise that strncpy(..., IFNAMSIZ-1) trips. */
+    snprintf(ifr.ifr_name, IFNAMSIZ, "%s", iface);
     if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
         fprintf(stderr, "can: SIOCGIFINDEX(%s): %s\n", iface, strerror(errno));
         close(s); return -1;
@@ -298,29 +300,68 @@ static const char *msg_type_str(uint8_t t) {
         default: return "UNKNOWN";
     }
 }
+/* Program Type table per docs/SOREL_CAN_bus_interface_rev11_COSTUMERS.pdf.
+ * 0x8B is NOT in the rev-11 doc but the function-number layout (DLF_SENSOR,
+ * DLF_RELAY, DLG_HYDRAULIK_CONFIG) is identical to 0x80 DATALOGGER_MONITOR --
+ * almost certainly a CALEONbox-specific channel of the same datalogger. */
 static const char *prog_name(uint8_t p) {
     switch (p) {
         case 0x0B: return "CONTROLLER";
+        case 0x80: return "DATALOGGER_MONITOR";
         case 0x83: return "REMOTESENSOR";
-        case 0x84: return "NAMEDSENSOR";
-        case 0x8B: return "HEATINGCONTROL";
-        case 0x90: return "PARAMETERSYNC";
+        case 0x84: return "DATALOGGER_NAMEDSENSORS"; /* aka REMOTESENSOR (compat) */
+        case 0x85: return "HCC";                     /* heating circuit control */
+        case 0x8B: return "HEATINGCONTROL";          /* see comment above */
+        case 0x8C: return "AVAILABLERESOURCES";
+        case 0x90: return "PARAMETERSYNCCONFIG";
+        case 0x91: return "ROOMSYNC";
+        case 0x94: return "MSGLOG";
+        case 0x95: return "ROOMDATA";                /* Anybus gateway: room  */
+                                                     /* data req/resp; see    */
+                                                     /* docs/CBox_Documentation*/
+        case 0x97: return "CALEON_S_PEER";           /* observed: CALEON S    */
+                                                     /* program byte == its   */
+                                                     /* own subscriber id;    */
+                                                     /* peer channel to the   */
+                                                     /* CALEONbox (B5).       */
         default:   return "UNKNOWN";
     }
 }
+
+/* DLF_SENSOR sensor type enum (SCBI rev 11 page 5). Drives both the
+ * unit string and the value scaling in decode_heatingcontrol(). */
+static const char *hc_sensor_type_name(uint8_t t) {
+    switch (t) {
+        case 0: return "unknown";
+        case 1: return "flow";          /* VFS sensor (l/min)         */
+        case 2: return "relPressure";   /* RPS sensor (bar)           */
+        case 3: return "diffPressure";  /* DPS sensor (bar)           */
+        case 4: return "temperature";   /* decicelsius                */
+        case 5: return "humidity";      /* decipercent                */
+        case 6: return "rcWheel";       /* room controller wheel      */
+        case 7: return "rcSwitch";      /* room controller switch     */
+        default: return "?";
+    }
+}
+
+/* DLF_RELAY mode enum from SCBI rev 11 (0=SWITCHED, 1=PHASE, 2=PWM,
+ * 3=VOLTAGE) is the 0x80 layout. Our 0x8B channel uses a different
+ * payload entirely (ASCII labels in bytes 2-3) so the mode enum is
+ * not currently applied; left documented here for when we add 0x80. */
 static const char *controller_fn(uint8_t f) {
     switch (f) {
-        case 0: return "HAS_ANYBODY_HERE";
-        case 1: return "I_AM_HERE";
-        case 2: return "GET_CONTROLLER_ID";
-        case 3: return "GET_ACTIVE_PROGRAMS_LIST";
-        case 4: return "ADD_PROGRAM";
-        case 5: return "REMOVE_PROGRAM";
-        case 6: return "GET_SYSTEM_DATE_TIME";
-        case 7: return "SET_SYSTEM_DATE_TIME";
-        case 8: return "I_AM_RESETED";
-        case 9: return "DATALOGGER_TEST";
-        default: return "UNKNOWN";
+        case 0x00: return "HAS_ANYBODY_HERE";
+        case 0x01: return "I_AM_HERE";
+        case 0x02: return "GET_CONTROLLER_ID";
+        case 0x03: return "GET_ACTIVE_PROGRAMS_LIST";
+        case 0x04: return "ADD_PROGRAM";
+        case 0x05: return "REMOVE_PROGRAM";
+        case 0x06: return "GET_SYSTEM_DATE_TIME";
+        case 0x07: return "SET_SYSTEM_DATE_TIME";
+        case 0x08: return "I_AM_RESETED";
+        case 0x09: return "DATALOGGER_TEST";
+        case 0x14: return "DEVICE_INFO";  /* observed: OEM, variant?, fw_ver_LE */
+        default:   return "UNKNOWN";
     }
 }
 static const char *remotesensor_fn(uint8_t f) {
@@ -371,6 +412,27 @@ static bool ecs_is_absent(int16_t v) {
     return v <= -30000;
 }
 
+/* ecsRcSwitch (0x83 fn=0x10) mode codes -- observed from app interaction,
+ * NOT from the SCBI doc (which only references roomController.h).
+ *
+ * raw  binary  app mode
+ *   2  0010    regular
+ *   8  1000    comfort
+ *  10  1010    eco
+ *  15  1111    off       (frost protection)
+ *
+ * All four user-facing app modes captured. Encoding doesn't reduce to a
+ * clean bitmask so we keep it as an opaque enum. */
+static const char *rc_switch_mode_name(int v) {
+    switch (v) {
+        case  2: return "regular";
+        case  8: return "comfort";
+        case 10: return "eco";
+        case 15: return "off";
+        default: return NULL;
+    }
+}
+
 /* Unit conversion for ecs* remote-sensor functions. The raw on-wire
  * value is little-endian int16; scaling depends on function:
  *
@@ -390,9 +452,11 @@ static void ecs_unit(uint8_t fn, double raw, double *out_value,
             *out_value = raw / 10.0; *out_unit = "degC"; return;
         case 0x0D:                                     /* Humidity                 */
             *out_value = raw / 10.0; *out_unit = "%rh";  return;
-        case 0x0F:                                     /* Wheel  (TBC)             */
-        case 0x10:                                     /* Switch (mode bitmask?)   */
-            *out_value = raw;        *out_unit = "code"; return;
+        case 0x0F:                                     /* Wheel: signed int8 -5..+5 */
+            *out_value = raw;        *out_unit = "step"; return;
+        case 0x10:                                     /* Switch (mode enum, see   */
+                                                       /*  rc_switch_mode_name)    */
+            *out_value = raw;        *out_unit = "mode"; return;
         default:
             *out_value = raw;        *out_unit = "raw";  return;
     }
@@ -449,7 +513,28 @@ static cJSON *decode_controller(const frame_t *f,
             msg_type_str(f->message_type), f->subscriber_id);
 
     cJSON *e = NULL;
-    if ((f->function_type == 0x01 || f->function_type == 0x08)
+    if (f->function_type == 0x14 && f->dlc >= 4) {
+        /* DEVICE_INFO: OEM_ID, variant?, firmware version (LE uint16),
+         * then padding. Observed in the wild for the CALEONbox at
+         *   payload = C1 00 88 81 00 00 00 00
+         * which decodes as OEM=0xC1 (CALEONbox), variant=0x00,
+         * firmware = 0x8188 = 33160. */
+        uint8_t  oem = f->data[0];
+        uint8_t  var = f->data[1];
+        uint16_t fw  = (uint16_t)(f->data[2] | (f->data[3] << 8));
+        fprintf(stdout, " ... DEVICE_INFO: OEM=0x%02X, Variant=0x%02X,"
+                " Firmware=%u (0x%04X)\n", oem, var, fw, fw);
+        e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "type", "device_info");
+        cJSON_AddStringToObject(e, "function", fn);
+        json_common(e, f);
+        cJSON_AddNumberToObject(e, "oem_id", oem);
+        cJSON_AddNumberToObject(e, "device_variant", var);
+        cJSON_AddNumberToObject(e, "firmware", fw);
+        *subtopic = "device";
+        *retain   = true;
+    }
+    else if ((f->function_type == 0x01 || f->function_type == 0x08)
         && f->dlc >= 4) {
         uint8_t dev_sub = f->data[0], dev_id = f->data[1];
         uint8_t oem     = f->data[2], var    = f->data[3];
@@ -551,6 +636,11 @@ static cJSON *decode_remotesensor(const frame_t *f,
         cJSON_AddNumberToObject(e, "value", v);
         cJSON_AddStringToObject(e, "unit", unit);
         cJSON_AddBoolToObject(e, "present", true);
+        /* For ecsRcSwitch (0x10) attach a friendly mode name when known */
+        if (f->function_type == 0x10) {
+            const char *mn = rc_switch_mode_name(value);
+            if (mn) cJSON_AddStringToObject(e, "mode_name", mn);
+        }
     }
     if (f->dlc == 6) {
         cJSON_AddNumberToObject(e, "room_index", ridx);
@@ -651,19 +741,31 @@ static cJSON *decode_heatingcontrol(const frame_t *f,
         json_common(e, f);
         cJSON_AddNumberToObject(e, "sensor_no", sno);
         cJSON_AddNumberToObject(e, "sensor_type", styp);
+        cJSON_AddStringToObject(e, "sensor_type_name", hc_sensor_type_name(styp));
         cJSON_AddNumberToObject(e, "value_raw", value);
-        /* sensor_type==0 means the slot is unconfigured; the value=256
-         * pattern repeats across every empty channel and is not a real
-         * reading. Mark these absent rather than emitting a fake 25.6 C. */
-        if (styp == 0) {
+        /* 0x8B DLF_SENSOR appears to carry SLOT METADATA, not live
+         * readings: every configured slot reports value_raw=0x0100=256
+         * regardless of sensor_type, so 25.6degC/25.6% would be fake.
+         * Live readings arrive on the 0x83 REMOTESENSOR channel. Mark
+         * the well-known sentinels as not-present; only emit a scaled
+         * value if we ever see something other than 256/6400/2304. */
+        bool slot_sentinel = (value == 256 || value == 6400 || value == 2304);
+        if (styp == 0 || slot_sentinel) {
             cJSON_AddNullToObject(e, "value");
             cJSON_AddBoolToObject(e, "present", false);
         } else {
-            /* For configured sensors the scaling depends on sensor_type
-             * (PT1000/NTC -> degC, flow meter -> Hz, pressure -> bar, ...)
-             * which we haven't mapped yet. Emit raw until we do. */
-            cJSON_AddNumberToObject(e, "value", value);
-            cJSON_AddStringToObject(e, "unit", "raw");
+            double v = value;
+            const char *unit = "raw";
+            switch (styp) {
+                case 4: v = value / 10.0; unit = "degC"; break;
+                case 5: v = value / 10.0; unit = "%rh";  break;
+                case 1: unit = "flow_raw";     break; /* VFS, sub-type gives l/min range */
+                case 2: unit = "pressure_raw"; break; /* RPS, sub-type gives bar range  */
+                case 3: unit = "pressure_raw"; break; /* DPS                            */
+                case 6: case 7: unit = "code"; break; /* RC wheel / switch              */
+            }
+            cJSON_AddNumberToObject(e, "value", v);
+            cJSON_AddStringToObject(e, "unit", unit);
             cJSON_AddBoolToObject(e, "present", true);
         }
         if (f->dlc >= 8) cJSON_AddNumberToObject(e, "flags", f->data[7]);
@@ -671,11 +773,23 @@ static cJSON *decode_heatingcontrol(const frame_t *f,
         if (n) cJSON_AddStringToObject(e, "name", n);
         *subtopic = "hc/sensor";
     } else if (f->function_type == 0x02 && f->dlc >= 4) {
-        uint8_t rno   = f->data[0];
-        uint8_t mode  = f->data[1];
-        int16_t value = (int16_t)((f->data[3] << 8) | f->data[2]);
-        fprintf(stdout, " ... Relay: Number=0x%02X, Mode=0x%02X,"
-                " Value=0x%04X (%d)", rno, mode, (uint16_t)value, value);
+        /* On the 0x8B channel the DLF_RELAY payload does NOT match the
+         * SCBI rev-11 layout (which says byte1=mode, byte2=value%, ...).
+         * Captured idle bytes for our box are:
+         *   relay 0..10 : NN 08 <L> 00 00 00 00 00   <L>='A'..'K'
+         *   relay 11..13: NN 08 4E <D> 00 00 00 00   "N1"/"N4"/"N8"
+         * so bytes 2-3 are the ASCII terminal label printed on the box,
+         * not a PWM duty cycle. byte 1 is always 0x08 (a status/format
+         * flag, exact meaning unknown). The actual on/off state must
+         * live in one of bytes 4-7 which are all zero while relays are
+         * off -- we'll see which when a relay fires. */
+        uint8_t rno  = f->data[0];
+        uint8_t flag = f->data[1];
+        char label[3] = { (char)f->data[2],
+                          (f->dlc >= 4 && f->data[3]) ? (char)f->data[3] : '\0',
+                          '\0' };
+        fprintf(stdout, " ... Relay: Number=0x%02X, Flag=0x%02X,"
+                " Label=\"%s\"", rno, flag, label);
         if (f->dlc > 4) {
             fprintf(stdout, ", Extra=");
             for (int i = 4; i < f->dlc; i++) fprintf(stdout, "%02X", f->data[i]);
@@ -687,14 +801,14 @@ static cJSON *decode_heatingcontrol(const frame_t *f,
         cJSON_AddStringToObject(e, "function", fn);
         json_common(e, f);
         cJSON_AddNumberToObject(e, "relay_no", rno);
-        cJSON_AddNumberToObject(e, "mode", mode);
-        cJSON_AddNumberToObject(e, "value_raw", value);
-        /* Observed values are 0..100 across all active relays at idle and
-         * under load, which is consistent with PWM duty cycle %. The mode
-         * byte (0x08 seen everywhere so far) probably selects manual /
-         * auto / off. Pass value through unchanged with a percent unit. */
-        cJSON_AddNumberToObject(e, "value", value);
-        cJSON_AddStringToObject(e, "unit", "%");
+        cJSON_AddNumberToObject(e, "flag", flag);
+        cJSON_AddStringToObject(e, "label", label);
+        /* Preserve all "extra" bytes so we can spot the on/off byte
+         * the first time a relay actually switches under load. */
+        cJSON *extra = cJSON_CreateArray();
+        for (int i = 4; i < f->dlc; i++)
+            cJSON_AddItemToArray(extra, cJSON_CreateNumber(f->data[i]));
+        cJSON_AddItemToObject(e, "extra", extra);
         const char *n = cfg_lookup_u8(g_cfg.hc_relays, rno);
         if (n) cJSON_AddStringToObject(e, "name", n);
         *subtopic = "hc/relay";
