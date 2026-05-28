@@ -1,0 +1,16 @@
+[Unit]
+Description=slcand: CANable (/dev/ttyACM0) -> can0 @ 250k
+Requires=dev-ttyACM0.device
+After=dev-ttyACM0.device
+BindsTo=dev-ttyACM0.device
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/slcand -F -o -c -s5 /dev/ttyACM0 can0
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do ip link show can0 >/dev/null 2>&1 && exit 0 || sleep 0.1; done; exit 1'
+ExecStartPost=/sbin/ip link set up can0
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

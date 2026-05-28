@@ -1,0 +1,16 @@
+[Unit]
+Description=cannelloni: can0 <-> 192.168.0.254 (UDP 20000)
+Requires=slcand.service
+After=slcand.service
+BindsTo=slcand.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cannelloni -I can0 -R 192.168.0.254 -r 20000 -l 20000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
