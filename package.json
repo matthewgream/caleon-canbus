@@ -1,0 +1,11 @@
+{
+  "name": "caleon-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "bin": { "caleon-tui": "./caleon-tui.js" },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "mqtt": "^5.10.0"
+  }
+}

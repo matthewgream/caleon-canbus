@@ -314,7 +314,7 @@ int close_port()
 
 int main(void)
 {
-    open_port("can0");
+    open_port("vcan0");
     read_port();
     return 0;
 }
