@@ -44,26 +44,91 @@ Systemd units to run each side are in `server/` and `client/`:
 listens on `vcan0`, parses the SOREL SCBI program/function/message layout,
 applies per-function scaling (decicelsius, decipercent, mode enum, ASCII
 relay/PWM labels, sensor-absent sentinels) and publishes structured JSON on
-`caleon/*` topics. The raw decoder debug stream is still printed on stdout so
-further protocol reverse-engineering can continue.
+`caleon/*` topics. With `--debug` it also prints the raw per-frame trace on
+stdout — the same format the original `test.c` produced — so further protocol
+reverse-engineering can continue.
 
-- Build: `make` (needs `libmosquitto-dev` and `libcjson-dev`).
-- Run:   `./caleon2mqtt caleon2mqtt.cfg`.
+- Build: `make caleon2mqtt` (needs `libmosquitto-dev` and `libcjson-dev`).
+- Run:   `./caleon2mqtt -c caleon2mqtt.cfg [-i vcan0] [--debug]`.
 - Config: `caleon2mqtt.cfg` (JSON) holds the broker settings plus the
   room/subscriber/relay/aux-function name tables — all installation-specific
   mapping lives there, not in code.
+- Service: `caleon2mqtt.service` runs it as
+  `caleon2mqtt -c /etc/default/caleon2mqtt` with auto-restart. `make install`
+  drops the unit into `/etc/systemd/system/`; the installed config is at
+  `/etc/default/caleon2mqtt` (see [Makefile](#makefile) for the host-specific
+  override). Enable with `systemctl daemon-reload && systemctl enable --now
+  caleon2mqtt`.
+
+## caleon-web
+
+`caleon-web.c` is a single-file C web app (libmosquitto + libcjson +
+pthread, hand-rolled HTTP server, no other dependencies) that subscribes to
+`caleon/sensor`, keeps an in-memory snapshot of every room it has seen, and
+serves a small HTML page plus a Server-Sent Events stream so a connected
+browser updates live. Each event carries per-field "seconds ago" so the UI
+can show how stale a reading is and tick locally between updates. Only the
+rooms panel is rendered today; more panels (relays, HC sensors, central
+plant, devices) can be added the same way.
+
+- Build: `make caleon-web`.
+- Run:   `./caleon-web --mqtt localhost:1883 --port 3002 [--debug]`. With
+  `--debug` every MQTT message, parse decision, HTTP request and SSE
+  broadcast is logged to stderr.
+- Service: `caleon-web.service` runs
+  `caleon-web --mqtt localhost:1883 --port 3002` with auto-restart. `make
+  install` drops the unit into `/etc/systemd/system/`. Enable with
+  `systemctl daemon-reload && systemctl enable --now caleon-web`, then point
+  a browser at `http://<host>:3002/`.
 
 ## caleon-tui
 
 `caleon-tui.js` is a Node.js [blessed](https://github.com/chjj/blessed) console
 TUI that subscribes to `caleon/#` and shows live rooms, central plant,
 relays, HC sensors and an event log. It reads the same `caleon2mqtt.cfg` for
-human-readable names.
+human-readable names. Same data, much richer than the web UI for now.
 
 ![caleon-tui screenshot](assets/caleon-tui.jpg)
 
 - Install: `npm install`.
 - Run:     `node caleon-tui.js` (q or Ctrl-C to quit).
+
+## Makefile
+
+| target            | what it does                                                     |
+| ----------------- | ---------------------------------------------------------------- |
+| `make` / `all`    | builds both `caleon2mqtt` and `caleon-web`                       |
+| `make caleon2mqtt`| just the decoder/bridge                                          |
+| `make caleon-web` | just the web app                                                 |
+| `make install`    | installs binaries, config, and both systemd units (see below)    |
+| `make install-bin`| binaries only, to `$(PREFIX)/bin` (default `/usr/local/bin`)     |
+| `make install-cfg`| config to `/etc/default/caleon2mqtt` (with host override, below) |
+| `make install-service` | both `.service` files to `/etc/systemd/system/`             |
+| `make uninstall`  | removes everything `make install` placed                         |
+| `make clean`      | removes built binaries                                           |
+| `make format`     | `clang-format -i` the C sources, `prettier --write` the JS       |
+
+**Prove it from the console first, then turn it into a service.** Both
+binaries log lifecycle and errors to stderr and have a `--debug` flag for
+verbose traces, so the smooth path is:
+
+1. Run `./caleon2mqtt -c caleon2mqtt.cfg --debug` in one screen/tmux pane and
+   watch the per-frame decoder output. Once you see CAN frames being decoded
+   and `mqtt: connected`, you know the bridge is alive.
+2. Run `./caleon-web --mqtt localhost:1883 --port 3002 --debug` in another
+   pane, open `http://<host>:3002/` and confirm rooms appear.
+3. Optionally run `node caleon-tui.js` to cross-check against the TUI.
+4. Once both have been running stably for a while, drop `--debug`, run
+   `sudo make install` and `sudo systemctl enable --now caleon2mqtt
+   caleon-web`. The services log to the journal (`journalctl -u
+   caleon2mqtt -f` etc.).
+
+**Host-specific config.** Following the same pattern as `/opt/hostmon`, if a
+file named `caleon2mqtt.$(hostname).cfg` exists in the source directory,
+`make install-cfg` installs *that* as `/etc/default/caleon2mqtt`; otherwise
+it installs the repo's `caleon2mqtt.cfg`. The repo copy currently holds the
+author's home install — drop in `caleon2mqtt.<yourhost>.cfg` to override
+per-machine without disturbing it.
 
 ## docs
 

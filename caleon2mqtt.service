@@ -1,0 +1,13 @@
+[Unit]
+Description=caleon2mqtt: decode Sorel/Caleon CAN frames and publish to MQTT
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/caleon2mqtt -c /etc/default/caleon2mqtt
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

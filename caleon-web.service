@@ -1,0 +1,13 @@
+[Unit]
+Description=caleon-web: MQTT-backed HTTP UI for the Caleon decoder
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/caleon-web --mqtt localhost:1883 --port 3002
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
