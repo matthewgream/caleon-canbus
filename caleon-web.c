@@ -32,6 +32,7 @@
 
 #define DEFAULT_HTTP_PORT 3002
 #define MAX_ROOMS 32
+#define MAX_DEVICES 16
 #define MAX_CLIENTS 32
 #define LISTEN_BACKLOG 16
 #define HEARTBEAT_SECS 15
@@ -50,7 +51,20 @@ typedef struct {
 } room_t;
 
 static room_t g_rooms[MAX_ROOMS];
-static int g_nrooms               = 0;
+static int g_nrooms = 0;
+
+typedef struct {
+    int subscriber_id;
+    char subscriber_name[64]; /* "" if unmapped */
+    int oem_id;
+    int device_variant;
+    int firmware;
+    time_t ts;
+} device_t;
+
+static device_t g_devices[MAX_DEVICES];
+static int g_ndevices = 0;
+
 static pthread_mutex_t g_state_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int g_clients[MAX_CLIENTS];
@@ -86,6 +100,30 @@ static room_t *find_or_add_room(int idx, int type) {
     r->idx  = idx;
     r->type = type;
     return r;
+}
+
+static device_t *find_or_add_device(int subscriber_id) {
+    for (int i = 0; i < g_ndevices; i++)
+        if (g_devices[i].subscriber_id == subscriber_id)
+            return &g_devices[i];
+    if (g_ndevices >= MAX_DEVICES)
+        return NULL;
+    device_t *d = &g_devices[g_ndevices++];
+    memset(d, 0, sizeof(*d));
+    d->subscriber_id = subscriber_id;
+    return d;
+}
+
+static cJSON *device_to_json(const device_t *d, time_t now) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "subscriber_id", d->subscriber_id);
+    if (d->subscriber_name[0])
+        cJSON_AddStringToObject(o, "subscriber_name", d->subscriber_name);
+    cJSON_AddNumberToObject(o, "oem_id", d->oem_id);
+    cJSON_AddNumberToObject(o, "device_variant", d->device_variant);
+    cJSON_AddNumberToObject(o, "firmware", d->firmware);
+    cJSON_AddNumberToObject(o, "age", (double)(now - d->ts));
+    return o;
 }
 
 /* Build a JSON object for one room. Fields that have never been observed
@@ -178,6 +216,15 @@ static void broadcast_room(const room_t *r) {
     cJSON_Delete(o);
 }
 
+static void broadcast_device(const device_t *d) {
+    time_t now = time(NULL);
+    cJSON *o   = device_to_json(d, now);
+    char *s    = cJSON_PrintUnformatted(o);
+    broadcast_event("device", s);
+    free(s);
+    cJSON_Delete(o);
+}
+
 /* -------------------------------------------------------------- mqtt side */
 
 static void on_mqtt_connect(struct mosquitto *m, void *u, int rc) {
@@ -186,10 +233,12 @@ static void on_mqtt_connect(struct mosquitto *m, void *u, int rc) {
         fprintf(stderr, "mqtt: connect failed: %s\n", mosquitto_connack_string(rc));
         return;
     }
-    fprintf(stderr, "mqtt: connected, subscribing caleon/sensor\n");
+    fprintf(stderr, "mqtt: connected, subscribing caleon/sensor and caleon/device\n");
     int mid = 0;
     int sub = mosquitto_subscribe(m, &mid, "caleon/sensor", 0);
     DBG("mqtt subscribe rc=%d mid=%d topic=caleon/sensor", sub, mid);
+    sub = mosquitto_subscribe(m, &mid, "caleon/device", 0);
+    DBG("mqtt subscribe rc=%d mid=%d topic=caleon/device", sub, mid);
 }
 
 static void on_mqtt_disconnect(struct mosquitto *m, void *u, int rc) {
@@ -202,6 +251,44 @@ static void on_mqtt_subscribe(struct mosquitto *m, void *u, int mid, int qos_cou
     (void)m;
     (void)u;
     DBG("mqtt SUBACK mid=%d qos_count=%d granted_qos[0]=%d", mid, qos_count, qos_count > 0 ? granted_qos[0] : -1);
+}
+
+static void handle_device_msg(cJSON *p) {
+    cJSON *jsub  = cJSON_GetObjectItem(p, "subscriber_id");
+    cJSON *jname = cJSON_GetObjectItem(p, "subscriber_name");
+    cJSON *joem  = cJSON_GetObjectItem(p, "oem_id");
+    cJSON *jvar  = cJSON_GetObjectItem(p, "device_variant");
+    cJSON *jfw   = cJSON_GetObjectItem(p, "firmware");
+    if (!cJSON_IsNumber(jsub) || !cJSON_IsNumber(jfw)) {
+        DBG("  -> skip device: missing subscriber_id or firmware");
+        return;
+    }
+    int sub = (int)jsub->valuedouble;
+    int fw  = (int)jfw->valuedouble;
+    /* DEVICE_INFO request packets carry firmware=0 -- ignore those,
+     * we only want the actual response with the real version. */
+    if (fw == 0) {
+        DBG("  -> skip device: firmware=0 (request, not response)");
+        return;
+    }
+    time_t now = time(NULL);
+    device_t snap;
+    pthread_mutex_lock(&g_state_mu);
+    device_t *d = find_or_add_device(sub);
+    if (!d) {
+        pthread_mutex_unlock(&g_state_mu);
+        return;
+    }
+    d->oem_id         = cJSON_IsNumber(joem) ? (int)joem->valuedouble : 0;
+    d->device_variant = cJSON_IsNumber(jvar) ? (int)jvar->valuedouble : 0;
+    d->firmware       = fw;
+    if (cJSON_IsString(jname))
+        snprintf(d->subscriber_name, sizeof(d->subscriber_name), "%s", jname->valuestring);
+    d->ts = now;
+    snap  = *d;
+    pthread_mutex_unlock(&g_state_mu);
+    DBG("  -> device sub=0x%02X name=%s oem=0x%02X fw=%u", sub, snap.subscriber_name[0] ? snap.subscriber_name : "?", snap.oem_id, snap.firmware);
+    broadcast_device(&snap);
 }
 
 static void on_mqtt_msg(struct mosquitto *m, void *u, const struct mosquitto_message *msg) {
@@ -217,11 +304,18 @@ static void on_mqtt_msg(struct mosquitto *m, void *u, const struct mosquitto_mes
         return;
     memcpy(tmp, msg->payload, (size_t)msg->payloadlen);
     tmp[msg->payloadlen] = 0;
-    DBG("mqtt msg topic=%s len=%d payload=%.200s", msg->topic ? msg->topic : "?", msg->payloadlen, tmp);
+    const char *topic    = msg->topic ? msg->topic : "?";
+    DBG("mqtt msg topic=%s len=%d payload=%.200s", topic, msg->payloadlen, tmp);
     cJSON *p = cJSON_Parse(tmp);
     free(tmp);
     if (!p) {
         DBG("  -> JSON parse failed");
+        return;
+    }
+
+    if (strcmp(topic, "caleon/device") == 0) {
+        handle_device_msg(p);
+        cJSON_Delete(p);
         return;
     }
 
@@ -331,7 +425,6 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 ".mode{color:#fc6}"
                                 "#status{color:#777;font-size:.85em;margin-top:.4em}"
                                 "</style></head><body>"
-                                "<h1>caleon</h1>"
                                 "<div class=box><h2>Rooms</h2>"
                                 "<table id=rooms><thead><tr>"
                                 "<th>idx</th><th>type</th><th>name</th>"
@@ -339,19 +432,28 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "<th>mode</th><th class=num>hum</th><th class=num>age</th>"
                                 "</tr></thead><tbody></tbody></table>"
                                 "<div id=status>connecting...</div></div>"
+                                "<div class=box><h2>Devices</h2>"
+                                "<table id=devices><thead><tr>"
+                                "<th>id</th><th>name</th>"
+                                "<th class=num>oem</th><th class=num>variant</th>"
+                                "<th class=num>firmware</th><th class=num>age</th>"
+                                "</tr></thead><tbody></tbody></table></div>"
                                 "<script>\n"
-                                "const tbody=document.querySelector('#rooms tbody');\n"
+                                "const rtbody=document.querySelector('#rooms tbody');\n"
+                                "const dtbody=document.querySelector('#devices tbody');\n"
                                 "const status=document.getElementById('status');\n"
                                 "const rooms=new Map();\n"
-                                "function key(r){return r.idx+':'+r.type}\n"
+                                "const devices=new Map();\n"
+                                "function rkey(r){return r.idx+':'+r.type}\n"
                                 "function fmt(v,u){return v==null?'<span class=absent>--</span>':v.toFixed(1)+u}\n"
+                                "function hex2(n){return '0x'+n.toString(16).toUpperCase().padStart(2,'0')}\n"
                                 "function youngest(r){\n"
                                 "  const v=[r.age_temp,r.age_tset,r.age_hum,r.age_sw].filter(x=>x!=null);\n"
                                 "  return v.length?Math.min.apply(null,v):null;\n"
                                 "}\n"
-                                "function render(){\n"
+                                "function renderRooms(){\n"
                                 "  const ord=[...rooms.values()].sort((a,b)=>a.idx-b.idx||a.type-b.type);\n"
-                                "  tbody.innerHTML=ord.map(r=>{\n"
+                                "  rtbody.innerHTML=ord.map(r=>{\n"
                                 "    const age=youngest(r);\n"
                                 "    return '<tr>'+\n"
                                 "      '<td>'+r.idx+'</td>'+\n"
@@ -365,18 +467,39 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "    '</tr>';\n"
                                 "  }).join('');\n"
                                 "}\n"
-                                "function merge(r){\n"
-                                "  const k=key(r);const cur=rooms.get(k)||{idx:r.idx,type:r.type};\n"
+                                "function renderDevices(){\n"
+                                "  const ord=[...devices.values()].sort((a,b)=>a.subscriber_id-b.subscriber_id);\n"
+                                "  dtbody.innerHTML=ord.map(d=>{\n"
+                                "    return '<tr>'+\n"
+                                "      '<td>'+hex2(d.subscriber_id)+'</td>'+\n"
+                                "      '<td>'+(d.subscriber_name||'<span class=absent>?</span>')+'</td>'+\n"
+                                "      '<td class=num>'+hex2(d.oem_id||0)+'</td>'+\n"
+                                "      '<td class=num>'+(d.device_variant!=null?d.device_variant:'--')+'</td>'+\n"
+                                "      '<td class=num>'+(d.firmware!=null?d.firmware:'--')+'</td>'+\n"
+                                "      '<td class=age>'+(d.age==null?'--':Math.round(d.age)+'s')+'</td>'+\n"
+                                "    '</tr>';\n"
+                                "  }).join('');\n"
+                                "}\n"
+                                "function render(){renderRooms();renderDevices();}\n"
+                                "function mergeRoom(r){\n"
+                                "  const k=rkey(r);const cur=rooms.get(k)||{idx:r.idx,type:r.type};\n"
                                 "  for(const f of ['name','temp','tset','humidity','mode','swval'])\n"
                                 "    if(f in r) cur[f]=r[f];\n"
                                 "  for(const f of ['age_temp','age_tset','age_hum','age_sw'])\n"
                                 "    if(f in r) cur[f]=r[f];\n"
                                 "  rooms.set(k,cur);\n"
                                 "}\n"
+                                "function mergeDevice(d){\n"
+                                "  const cur=devices.get(d.subscriber_id)||{subscriber_id:d.subscriber_id};\n"
+                                "  for(const f of ['subscriber_name','oem_id','device_variant','firmware','age'])\n"
+                                "    if(f in d) cur[f]=d[f];\n"
+                                "  devices.set(d.subscriber_id,cur);\n"
+                                "}\n"
                                 "function tick(){\n"
                                 "  for(const r of rooms.values())\n"
                                 "    for(const f of ['age_temp','age_tset','age_hum','age_sw'])\n"
                                 "      if(r[f]!=null) r[f]+=1;\n"
+                                "  for(const d of devices.values()) if(d.age!=null) d.age+=1;\n"
                                 "  render();\n"
                                 "}\n"
                                 "setInterval(tick,1000);\n"
@@ -384,8 +507,14 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "  const es=new EventSource('/events');\n"
                                 "  es.onopen=()=>{status.textContent='live'};\n"
                                 "  es.onerror=()=>{status.textContent='reconnecting...'};\n"
-                                "  es.addEventListener('snapshot',e=>{JSON.parse(e.data).forEach(merge);render()});\n"
-                                "  es.addEventListener('room',e=>{merge(JSON.parse(e.data));render()});\n"
+                                "  es.addEventListener('snapshot',e=>{\n"
+                                "    const o=JSON.parse(e.data);\n"
+                                "    (o.rooms||[]).forEach(mergeRoom);\n"
+                                "    (o.devices||[]).forEach(mergeDevice);\n"
+                                "    render();\n"
+                                "  });\n"
+                                "  es.addEventListener('room',e=>{mergeRoom(JSON.parse(e.data));render()});\n"
+                                "  es.addEventListener('device',e=>{mergeDevice(JSON.parse(e.data));render()});\n"
                                 "}\n"
                                 "connect();\n"
                                 "</script></body></html>";
@@ -429,14 +558,21 @@ static void start_sse(int fd) {
     }
 
     pthread_mutex_lock(&g_state_mu);
-    time_t now = time(NULL);
-    cJSON *arr = cJSON_CreateArray();
+    time_t now   = time(NULL);
+    cJSON *snapo = cJSON_CreateObject();
+    cJSON *rarr  = cJSON_CreateArray();
+    cJSON *darr  = cJSON_CreateArray();
     for (int i = 0; i < g_nrooms; i++)
-        cJSON_AddItemToArray(arr, room_to_json(&g_rooms[i], now));
+        cJSON_AddItemToArray(rarr, room_to_json(&g_rooms[i], now));
+    for (int i = 0; i < g_ndevices; i++)
+        cJSON_AddItemToArray(darr, device_to_json(&g_devices[i], now));
+    cJSON_AddItemToObject(snapo, "rooms", rarr);
+    cJSON_AddItemToObject(snapo, "devices", darr);
+    int rn = g_nrooms, dn = g_ndevices;
     pthread_mutex_unlock(&g_state_mu);
 
-    char *snap = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
+    char *snap = cJSON_PrintUnformatted(snapo);
+    cJSON_Delete(snapo);
 
     static const char hdr[] = "event: snapshot\ndata: ";
     if (sse_write(fd, hdr, sizeof(hdr) - 1) < 0 || sse_write(fd, snap, strlen(snap)) < 0 || sse_write(fd, "\n\n", 2) < 0) {
@@ -449,7 +585,7 @@ static void start_sse(int fd) {
     pthread_mutex_lock(&g_clients_mu);
     if (g_nclients < MAX_CLIENTS) {
         g_clients[g_nclients++] = fd;
-        DBG("sse client connected fd=%d snapshot_rooms=%d total_clients=%d", fd, g_nrooms, g_nclients);
+        DBG("sse client connected fd=%d snapshot_rooms=%d snapshot_devices=%d total_clients=%d", fd, rn, dn, g_nclients);
     } else {
         DBG("sse client rejected (MAX_CLIENTS=%d)", MAX_CLIENTS);
         close(fd);

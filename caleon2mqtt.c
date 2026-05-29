@@ -30,6 +30,14 @@
 #include <cjson/cJSON.h>
 #include <mosquitto.h>
 
+__attribute__((format(printf, 3, 4))) static const char *snprintf_inline(char *buf, size_t size, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, size, fmt, ap);
+    va_end(ap);
+    return buf;
+}
+
 /* ------------------------------------------------------------------ config */
 
 typedef struct {
@@ -69,10 +77,7 @@ static inline void dbg_out(const char *fmt, ...) {
 }
 #define DBGP(...) dbg_out(__VA_ARGS__)
 
-static void on_signal(int sig) {
-    (void)sig;
-    g_run = 0;
-}
+static void on_signal(__attribute__((unused)) int sig) { g_run = 0; }
 
 static char *slurp(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -162,15 +167,13 @@ static int cfg_load(const char *path) {
         g_cfg.mqtt_keepalive      = json_int(m, "keepalive", g_cfg.mqtt_keepalive);
         g_cfg.mqtt_retain_sensors = json_bool(m, "retain_sensors", g_cfg.mqtt_retain_sensors);
         strncpy(g_cfg.mqtt_topic, json_str(m, "topic", g_cfg.mqtt_topic), sizeof(g_cfg.mqtt_topic) - 1);
-        const char *cid = json_str(m, "client_id", NULL);
-        if (cid)
-            strncpy(g_cfg.mqtt_client_id, cid, sizeof(g_cfg.mqtt_client_id) - 1);
-        const char *u = json_str(m, "username", NULL);
-        if (u)
-            strncpy(g_cfg.mqtt_username, u, sizeof(g_cfg.mqtt_username) - 1);
-        const char *p = json_str(m, "password", NULL);
-        if (p)
-            strncpy(g_cfg.mqtt_password, p, sizeof(g_cfg.mqtt_password) - 1);
+        const char *s;
+        if ((s = json_str(m, "client_id", NULL)))
+            strncpy(g_cfg.mqtt_client_id, s, sizeof(g_cfg.mqtt_client_id) - 1);
+        if ((s = json_str(m, "username", NULL)))
+            strncpy(g_cfg.mqtt_username, s, sizeof(g_cfg.mqtt_username) - 1);
+        if ((s = json_str(m, "password", NULL)))
+            strncpy(g_cfg.mqtt_password, s, sizeof(g_cfg.mqtt_password) - 1);
     }
 
     g_cfg.rooms       = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "rooms");
@@ -186,8 +189,7 @@ static const char *cfg_room_name(uint8_t idx, uint8_t type) {
     if (!g_cfg.rooms)
         return NULL;
     char key[16];
-    snprintf(key, sizeof(key), "%u:%u", idx, type);
-    cJSON *r = cJSON_GetObjectItemCaseSensitive(g_cfg.rooms, key);
+    cJSON *r = cJSON_GetObjectItemCaseSensitive(g_cfg.rooms, snprintf_inline(key, sizeof(key), "%u:%u", idx, type));
     if (!r)
         return NULL;
     if (cJSON_IsString(r))
@@ -202,16 +204,11 @@ static const char *cfg_lookup_u8(cJSON *obj, uint8_t id) {
     if (!obj)
         return NULL;
     char key[8];
-    snprintf(key, sizeof(key), "0x%02X", id);
-    cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
-    if (!v) {
-        snprintf(key, sizeof(key), "0x%02x", id);
-        v = cJSON_GetObjectItemCaseSensitive(obj, key);
-    }
-    if (!v) {
-        snprintf(key, sizeof(key), "%u", id);
-        v = cJSON_GetObjectItemCaseSensitive(obj, key);
-    }
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, snprintf_inline(key, sizeof(key), "0x%02X", id));
+    if (!v)
+        v = cJSON_GetObjectItemCaseSensitive(obj, snprintf_inline(key, sizeof(key), "0x%02x", id));
+    if (!v)
+        v = cJSON_GetObjectItemCaseSensitive(obj, snprintf_inline(key, sizeof(key), "%u", id));
     return (v && cJSON_IsString(v)) ? v->valuestring : NULL;
 }
 
@@ -220,23 +217,18 @@ static const char *cfg_lookup_u8(cJSON *obj, uint8_t id) {
 static struct mosquitto *g_mosq = NULL;
 static bool g_mqtt_ok           = false;
 
-static void mqtt_on_connect(struct mosquitto *m, void *ud, int rc) {
-    (void)m;
-    (void)ud;
+static void mqtt_on_connect(__attribute__((unused)) struct mosquitto *m, __attribute__((unused)) void *ud, int rc) {
     g_mqtt_ok = (rc == 0);
     fprintf(stderr, "mqtt: %s (%s)\n", g_mqtt_ok ? "connected" : "connect failed", mosquitto_connack_string(rc));
 }
-static void mqtt_on_disconnect(struct mosquitto *m, void *ud, int rc) {
-    (void)m;
-    (void)ud;
+static void mqtt_on_disconnect(__attribute__((unused)) struct mosquitto *m, __attribute__((unused)) void *ud, int rc) {
     g_mqtt_ok = false;
     fprintf(stderr, "mqtt: disconnected (%s) -- will retry\n", mosquitto_strerror(rc));
 }
 
 static int mqtt_init(void) {
     mosquitto_lib_init();
-    g_mosq = mosquitto_new(g_cfg.mqtt_client_id, true, NULL);
-    if (!g_mosq) {
+    if (!(g_mosq = mosquitto_new(g_cfg.mqtt_client_id, true, NULL))) {
         fprintf(stderr, "mqtt: mosquitto_new failed\n");
         return -1;
     }
@@ -244,13 +236,12 @@ static int mqtt_init(void) {
     mosquitto_disconnect_callback_set(g_mosq, mqtt_on_disconnect);
     if (g_cfg.mqtt_username[0])
         mosquitto_username_pw_set(g_mosq, g_cfg.mqtt_username, g_cfg.mqtt_password[0] ? g_cfg.mqtt_password : NULL);
-    int rc = mosquitto_connect_async(g_mosq, g_cfg.mqtt_host, g_cfg.mqtt_port, g_cfg.mqtt_keepalive);
-    if (rc != MOSQ_ERR_SUCCESS) {
+    int rc;
+    if ((rc = mosquitto_connect_async(g_mosq, g_cfg.mqtt_host, g_cfg.mqtt_port, g_cfg.mqtt_keepalive)) != MOSQ_ERR_SUCCESS) {
         fprintf(stderr, "mqtt: connect_async %s:%d failed: %s\n", g_cfg.mqtt_host, g_cfg.mqtt_port, mosquitto_strerror(rc));
         return -1;
     }
-    rc = mosquitto_loop_start(g_mosq);
-    if (rc != MOSQ_ERR_SUCCESS) {
+    if ((rc = mosquitto_loop_start(g_mosq)) != MOSQ_ERR_SUCCESS) {
         fprintf(stderr, "mqtt: loop_start failed: %s\n", mosquitto_strerror(rc));
         return -1;
     }
@@ -272,10 +263,7 @@ static void mqtt_publish(const char *subtopic, cJSON *payload, bool retain) {
     if (!g_mosq)
         return;
     char topic[256];
-    if (subtopic && subtopic[0])
-        snprintf(topic, sizeof(topic), "%s/%s", g_cfg.mqtt_topic, subtopic);
-    else
-        snprintf(topic, sizeof(topic), "%s", g_cfg.mqtt_topic);
+    snprintf(topic, sizeof(topic), subtopic && subtopic[0] ? "%s/%s" : "%s", g_cfg.mqtt_topic, subtopic);
     char *s = cJSON_PrintUnformatted(payload);
     if (!s)
         return;
@@ -616,8 +604,7 @@ static void print_payload_raw(const frame_t *f, const char *label) {
 static void json_common(cJSON *j, const frame_t *f) {
     cJSON_AddNumberToObject(j, "ts", (double)f->ts);
     char idbuf[16];
-    snprintf(idbuf, sizeof(idbuf), "0x%08X", f->can_eff_id);
-    cJSON_AddStringToObject(j, "can_id", idbuf);
+    cJSON_AddStringToObject(j, "can_id", snprintf_inline(idbuf, sizeof(idbuf), "0x%08X", f->can_eff_id));
     cJSON_AddNumberToObject(j, "program_type", f->program_type);
     cJSON_AddStringToObject(j, "program", prog_name(f->program_type));
     cJSON_AddNumberToObject(j, "subscriber_id", f->subscriber_id);
