@@ -1,12 +1,25 @@
 # caleon-canbus
 
-Reverse-engineered MQTT bridge and live TUI for a Sorel/Caleon hydronic heating
-install (CALEONbox + CALEON S room panel + 1-wire sensors) reachable over CAN.
+Reverse-engineered MQTT bridge and live TUI/web UI for a Sorel/Caleon
+hydronic heating install (CALEONbox + CALEON S room panel + 1-wire sensors)
+reachable over CAN.
+
+## Contents
+
+- [Architecture](#architecture)
+- [caleon2mqtt](#caleon2mqtt) — CAN → MQTT decoder (C, systemd)
+- [caleon-web](#caleon-web) — minimal HTTP UI over MQTT (C, systemd)
+- [caleon-tui](#caleon-tui) — console TUI over MQTT (Node.js)
+- [Makefile](#makefile) — build, format, install
+- [docs](#docs) — vendor PDFs
 
 ## Architecture
 
-The CAN bus is bridged from the install site to a client over IP via 
-[cannelloni](https://github.com/mguentner/cannelloni):
+The CAN bus is bridged from the install site to wherever you want to consume
+it, over IP, via [cannelloni](https://github.com/mguentner/cannelloni). On
+top of the bridge sit the MQTT decoder ([caleon2mqtt](#caleon2mqtt)), the
+HTTP UI ([caleon-web](#caleon-web)) and the console TUI
+([caleon-tui](#caleon-tui)):
 
 ```
   [Heating bus]
@@ -17,26 +30,38 @@ The CAN bus is bridged from the install site to a client over IP via
        |                 firmware b158aa7 from github.com/normaldotcom/canable2.git)
        |
   ===== server (on-site box) =====
-   slcand   /dev/ttyACM0  ->  can0
-   cannelloni   can0  <->  UDP :20000
+   slcand          /dev/ttyACM0  ->  can0           [slcand.service]
+   cannelloni      can0  <->  UDP :20000            [cannelloni.service]
        |
        | UDP/IP over the LAN
        v
-  ===== client =====
-   vcan0 (virtual CAN)
-   cannelloni   vcan0  <->  server:20000
+  ===== client (anywhere) =====
+   vcan0           virtual CAN                      [vcan0.service]
+   cannelloni      vcan0  <->  server:20000         [cannelloni.service]
        |
        v
-   caleon2mqtt   --->   mosquitto   --->   caleon-tui / Home Assistant / etc.
+   caleon2mqtt     vcan0  ->  caleon/* on mosquitto [caleon2mqtt.service]
+       |
+       +---> caleon-web    HTTP/SSE on :3002        [caleon-web.service]
+       +---> caleon-tui    blessed console UI       (manual / screen / tmux)
+       +---> Home Assistant, Node-RED, etc.         (whatever subscribes)
 ```
 
-Systemd units to run each side are in `server/` and `client/`:
+There are three logical hosts above — **server** (the box wired to the
+CANable2), **client** (the box running `caleon2mqtt` + `caleon-web` against a
+local mosquitto), and any **downstream consumer**. In a small install they
+can all collapse onto one machine; the unit files don't care. The systemd
+units that go with each role:
 
-- `server/slcand.service` brings up `can0` from the CANable2 at 250 kbit/s.
-- `server/cannelloni.service` exposes `can0` as UDP/20000.
-- `client/vcan0.service` creates the virtual `vcan0`.
-- `client/cannelloni.service` (via `cannelloni.sh`) resolves the server over
-  mDNS and tunnels `vcan0` to it.
+- `server/slcand.service` — `can0` from the CANable2 at 250 kbit/s
+- `server/cannelloni.service` — exposes `can0` as UDP/20000
+- `client/vcan0.service` — creates the virtual `vcan0`
+- `client/cannelloni.service` — (via `cannelloni.sh`) resolves the server
+  over mDNS and tunnels `vcan0` to it
+- `caleon2mqtt.service` — runs the CAN→MQTT decoder against a local broker;
+  installed by `make install` to `/etc/systemd/system/`
+- `caleon-web.service` — runs the HTTP UI on `:3002`; also installed by
+  `make install`
 
 ## caleon2mqtt
 
@@ -70,6 +95,8 @@ browser updates live. Each event carries per-field "seconds ago" so the UI
 can show how stale a reading is and tick locally between updates. Only the
 rooms panel is rendered today; more panels (relays, HC sensors, central
 plant, devices) can be added the same way.
+
+![caleon-web screenshot](assets/caleon-web.jpg)
 
 - Build: `make caleon-web`.
 - Run:   `./caleon-web --mqtt localhost:1883 --port 3002 [--debug]`. With
