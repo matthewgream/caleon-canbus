@@ -60,6 +60,8 @@ TUI that subscribes to `caleon/#` and shows live rooms, central plant,
 relays, HC sensors and an event log. It reads the same `caleon2mqtt.cfg` for
 human-readable names.
 
+![caleon-tui screenshot](assets/caleon-tui.jpg)
+
 - Install: `npm install`.
 - Run:     `node caleon-tui.js` (q or Ctrl-C to quit).
 
