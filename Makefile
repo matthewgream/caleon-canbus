@@ -25,3 +25,6 @@ install: $(BIN)
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
+
+claude:
+	claude --resume 27a209a4-0796-45c3-9035-ac338f1306a3

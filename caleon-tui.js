@@ -175,15 +175,15 @@ function render() {
   /* relays -- bytes 4-7 are state-related but we don't yet know which is on/off,
    * so display all four so the user can spot which one moves first. */
   lines = [];
-  lines.push('{bold}{white-fg}  no  name     label flag  extra(4..7)  age{/}{/bold}');
+  lines.push('{bold}{white-fg}  no  name         label flag  extra(4..7)  age{/}{/bold}');
   for (const [no, r] of [...state.relays.entries()].sort((a,b) => a[0]-b[0])) {
     const nm = (cfg.hc_relays && (cfg.hc_relays[`0x${no.toString(16).padStart(2,'0').toUpperCase()}`] || cfg.hc_relays[`0x${no.toString(16).padStart(2,'0')}`] || cfg.hc_relays[String(no)])) || '';
     const extra = (r.extra || []).map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ').padEnd(11);
     const allZero = (r.extra || []).every(b => b === 0);
     const extraStyled = allZero ? `{gray-fg}${extra}{/}` : `{yellow-fg}${extra}{/}`;
     lines.push(
-      `  ${String(no).padStart(2)}  ${nm.padEnd(8)} ` +
-      ` "${(r.label||'').padEnd(2)}"  ` +
+      `  ${String(no).padStart(2)}  ${nm.padEnd(11)}  ` +
+      `"${(r.label||'').padEnd(2)}"  ` +
       `0x${(r.flag ?? 0).toString(16).padStart(2,'0').toUpperCase()}  ` +
       `${extraStyled}  ${ageStr(r.ts)}`
     );
@@ -192,7 +192,7 @@ function render() {
 
   /* sensors */
   lines = [];
-  lines.push('{bold}{white-fg}  no  name      kind         raw      value     age{/}{/bold}');
+  lines.push('{bold}{white-fg}  no  name              kind         raw      value     age{/}{/bold}');
   for (const [no, s] of [...state.sensors.entries()].sort((a,b) => a[0]-b[0])) {
     const nm = (cfg.hc_sensors && (cfg.hc_sensors[`0x${no.toString(16).padStart(2,'0').toUpperCase()}`] || cfg.hc_sensors[`0x${no.toString(16).padStart(2,'0')}`] || cfg.hc_sensors[String(no)])) || '';
     const absent = (s.present === false || s.value === null || s.value === undefined);
@@ -200,7 +200,7 @@ function render() {
     const valCell = absent ? '{gray-fg}    --   {/}'
                            : `${String(s.value).padStart(6)} ${(s.unit||'').padEnd(4)}`;
     lines.push(
-      `  ${String(no).padStart(2)}  ${nm.padEnd(8)}  ${kind}` +
+      `  ${String(no).padStart(2)}  ${nm.padEnd(16)}  ${kind}` +
       `  ${String(s.value_raw ?? '--').padStart(6)}` +
       `  ${valCell}  ${ageStr(s.ts)}`
     );
