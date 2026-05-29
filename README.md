@@ -122,18 +122,33 @@ human-readable names. Same data, much richer than the web UI for now.
 
 ## Makefile
 
-| target            | what it does                                                     |
-| ----------------- | ---------------------------------------------------------------- |
-| `make` / `all`    | builds both `caleon2mqtt` and `caleon-web`                       |
-| `make caleon2mqtt`| just the decoder/bridge                                          |
-| `make caleon-web` | just the web app                                                 |
-| `make install`    | installs binaries, config, and both systemd units (see below)    |
-| `make install-bin`| binaries only, to `$(PREFIX)/bin` (default `/usr/local/bin`)     |
-| `make install-cfg`| config to `/etc/default/caleon2mqtt` (with host override, below) |
-| `make install-service` | both `.service` files to `/etc/systemd/system/`             |
-| `make uninstall`  | removes everything `make install` placed                         |
-| `make clean`      | removes built binaries                                           |
-| `make format`     | `clang-format -i` the C sources, `prettier --write` the JS       |
+Targets are organised per service so you can install/restart/uninstall each
+independently. The combined `install`, `restart`, `uninstall` just chain the
+per-service ones. Following the `/opt/hostmon` pattern, the `install-*`
+service targets stop + disable any previous unit, drop the new files in,
+`daemon-reload`, then enable + start (safe when nothing is installed yet).
+
+| target                          | what it does                                                              |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| `make` / `all`                  | builds both `caleon2mqtt` and `caleon-web`                                |
+| `make caleon2mqtt`              | just the decoder/bridge                                                   |
+| `make caleon-web`               | just the web app                                                          |
+| `make install`                  | both `install-caleon2mqtt` and `install-caleon-web`                       |
+| `make install-caleon2mqtt`      | binary + config + service (stop/disable/install/reload/enable/start)      |
+| `make install-caleon2mqtt-bin`  | just the `caleon2mqtt` binary, to `$(PREFIX)/bin` (default `/usr/local/bin`) |
+| `make install-caleon2mqtt-cfg`  | just the config, to `/etc/default/caleon2mqtt` (host override applies)    |
+| `make install-caleon2mqtt-service` | just the systemd unit                                                  |
+| `make install-caleon-web`       | binary + service (no config file -- broker/port come in via CLI args)     |
+| `make install-caleon-web-bin`   | just the `caleon-web` binary                                              |
+| `make install-caleon-web-service` | just the systemd unit                                                   |
+| `make restart`                  | restart both services                                                     |
+| `make restart-caleon2mqtt`      | restart just `caleon2mqtt`                                                |
+| `make restart-caleon-web`       | restart just `caleon-web`                                                 |
+| `make uninstall`                | both `uninstall-caleon2mqtt` and `uninstall-caleon-web`                   |
+| `make uninstall-caleon2mqtt`    | stop/disable, then remove binary, config and unit                         |
+| `make uninstall-caleon-web`     | stop/disable, then remove binary and unit                                 |
+| `make clean`                    | removes built binaries                                                    |
+| `make format`                   | `clang-format -i` the C sources, `prettier --write` the JS                |
 
 **Prove it from the console first, then turn it into a service.** Both
 binaries log lifecycle and errors to stderr and have a `--debug` flag for
