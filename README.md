@@ -88,14 +88,26 @@ reverse-engineering can continue.
   filenames, both producing the same text as the `--debug` stdout trace and
   independent of the `--debug` flag:
   - `capture_all` — every frame
-  - `capture_unknown` — only frames the decoder produced no MQTT event for
-    (unrecognised program type, unhandled function/message, or intentional
-    `MSG_REQUEST`)
+  - `capture_unknown` — only frames the decoder didn't fully recognise
+    (unrecognised program type or unhandled function/message format).
+    Frames that are recognised but emit no MQTT event — e.g. our own
+    outgoing CONTROLLER requests, MSG_REQUEST for known functions — do
+    **not** clutter this log.
   Useful for continuing reverse engineering under a long-running service —
   point `capture_unknown` at a log and let unfamiliar traffic accumulate.
   Files open in append mode and are line-buffered; rotate with logrotate.
   The `caleon2mqtt.cfg` in the repo has an `_debug` example block; rename
   to `debug` to enable.
+- Polling: optional `polling` section asks the bus on a schedule. Each
+  enabled key fires once at startup and then on its period:
+  - `datetime`   — `CONTROLLER fn=0x06 GET_SYSTEM_DATE_TIME` (triggers the
+    `0x87 SYSTEM_DATETIME` broadcasts; both controllers reply)
+  - `deviceinfo` — `CONTROLLER fn=0x14 DEVICE_INFO` (refreshes OEM /
+    variant / firmware on `caleon/device`)
+  Value is a duration string: `5m`, `30m`, `12h`, `2h5m`, `5d`, `5d12h3m`.
+  Minimum 5m to avoid hammering the bus. Empty value falls back to 12h.
+  Sender id comes from `scbi.subscriber_id` (default `0xA5`, unused on this
+  bus — change if you collide with a real controller).
 
 ## caleon-web
 

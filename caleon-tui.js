@@ -59,6 +59,7 @@ const state = {
     sensors: new Map() /* no -> {value, type, ts} */,
     devices: new Map() /* subscriber_id -> {name, oem, variant, ts} */,
     central: new Map() /* function name -> {value, unit, present, ts} (RI=0,RT=0) */,
+    datetimes: [] /* recent system_datetime broadcasts, newest first */,
     unknown: 0,
     msgs: 0,
     raws: [] /* tail of {topic, type, line} */,
@@ -196,6 +197,17 @@ function render() {
             lines.push(`  ${fn.padEnd(14)} ${fmtVal(c.value, c.unit ? '°C' : '   ')}` + `${c.present ? '' : ' {gray-fg}(absent){/}'}  age ${ageStr(c.ts)}`);
         }
     }
+    lines.push('');
+    lines.push('{bold}{white-fg} System date/time (program 0x87){/}{/bold}');
+    if (state.datetimes.length === 0) {
+        lines.push('  (waiting...)');
+    } else {
+        for (const d of state.datetimes) {
+            const sk = d.skew_secs;
+            const skStr = sk == null ? '    --' : (sk > 0 ? '+' : '') + sk + 's';
+            lines.push(`  ${d.iso8601}  dow=${d.dow ?? '?'}  skew=${skStr.padStart(6)}  age ${ageStr(d.ts)}`);
+        }
+    }
     devBox.setContent(lines.join('\n'));
 
     /* relays -- bytes 4-7 are state-related but we don't yet know which is on/off,
@@ -291,6 +303,8 @@ mqttClient.on('message', (topic, buf) => {
         preview = `dev=0x${(m.device_subscriber_id || 0).toString(16).toUpperCase()} oem=0x${(m.oem_id || 0).toString(16).toUpperCase()} var=0x${(m.device_variant || 0).toString(16).toUpperCase()}`;
     } else if (t === 'device_info') {
         preview = `dev=0x${(m.subscriber_id || 0).toString(16).toUpperCase()} oem=0x${(m.oem_id || 0).toString(16).toUpperCase()} var=0x${(m.device_variant || 0).toString(16).toUpperCase()} fw=${m.firmware}`;
+    } else if (t === 'system_datetime') {
+        preview = `${m.iso8601} dow=${m.dow}`;
     } else {
         preview = JSON.stringify(m).slice(0, 80);
     }
@@ -380,6 +394,18 @@ mqttClient.on('message', (topic, buf) => {
                 firmware: m.firmware,
                 ts: tstamp,
             });
+        }
+    } else if (t === 'system_datetime' && m.iso8601) {
+        /* Drop dup-of-last (the broker replays retained on reconnect). */
+        if (!state.datetimes.length || state.datetimes[0].iso8601 !== m.iso8601) {
+            const reported = Math.floor(Date.parse(m.iso8601) / 1000);
+            state.datetimes.unshift({
+                iso8601: m.iso8601,
+                dow: m.dow,
+                skew_secs: Number.isFinite(reported) ? reported - Math.floor(Date.now() / 1000) : null,
+                ts: tstamp,
+            });
+            if (state.datetimes.length > 4) state.datetimes.length = 4;
         }
     } else {
         state.unknown++;

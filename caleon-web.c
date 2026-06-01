@@ -65,6 +65,18 @@ typedef struct {
 static device_t g_devices[MAX_DEVICES];
 static int g_ndevices = 0;
 
+/* Generic events feed. Up to MAX_EVENTS newest-first, cached server-side so
+ * the SSE snapshot can populate the UI on every reconnect/refresh. Today
+ * the only producer is the SYSTEM_DATETIME decoder; more kinds slot in. */
+#define MAX_EVENTS 5
+typedef struct {
+    char kind[16];     /* e.g. "datetime" */
+    char summary[96];  /* human-readable one-liner */
+    time_t local_ts;   /* server clock when received */
+    bool used;
+} event_t;
+static event_t g_events[MAX_EVENTS];
+
 static pthread_mutex_t g_state_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int g_clients[MAX_CLIENTS];
@@ -112,6 +124,29 @@ static device_t *find_or_add_device(int subscriber_id) {
     memset(d, 0, sizeof(*d));
     d->subscriber_id = subscriber_id;
     return d;
+}
+
+static cJSON *event_to_json(const event_t *e, time_t now) {
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "kind", e->kind);
+    cJSON_AddStringToObject(o, "summary", e->summary);
+    cJSON_AddNumberToObject(o, "age", (double)(now - e->local_ts));
+    return o;
+}
+
+/* Push to the events ring (newest at index 0). Caller holds g_state_mu.
+ * Drops a duplicate-of-last to avoid filling the ring on retained-msg
+ * replays. Returns true if accepted, false if it was a dup. */
+static bool events_push_locked(const char *kind, const char *summary) {
+    if (g_events[0].used && strcmp(g_events[0].kind, kind) == 0 && strcmp(g_events[0].summary, summary) == 0)
+        return false;
+    for (int i = MAX_EVENTS - 1; i > 0; i--)
+        g_events[i] = g_events[i - 1];
+    snprintf(g_events[0].kind, sizeof(g_events[0].kind), "%s", kind);
+    snprintf(g_events[0].summary, sizeof(g_events[0].summary), "%s", summary);
+    g_events[0].local_ts = time(NULL);
+    g_events[0].used     = true;
+    return true;
 }
 
 static cJSON *device_to_json(const device_t *d, time_t now) {
@@ -225,6 +260,15 @@ static void broadcast_device(const device_t *d) {
     cJSON_Delete(o);
 }
 
+static void broadcast_event_record(const event_t *e) {
+    time_t now = time(NULL);
+    cJSON *o   = event_to_json(e, now);
+    char *s    = cJSON_PrintUnformatted(o);
+    broadcast_event("event", s);
+    free(s);
+    cJSON_Delete(o);
+}
+
 /* -------------------------------------------------------------- mqtt side */
 
 static void on_mqtt_connect(struct mosquitto *m, void *u, int rc) {
@@ -233,12 +277,14 @@ static void on_mqtt_connect(struct mosquitto *m, void *u, int rc) {
         fprintf(stderr, "mqtt: connect failed: %s\n", mosquitto_connack_string(rc));
         return;
     }
-    fprintf(stderr, "mqtt: connected, subscribing caleon/sensor and caleon/device\n");
+    fprintf(stderr, "mqtt: connected, subscribing caleon/sensor, caleon/device and caleon/datetime\n");
     int mid = 0;
     int sub = mosquitto_subscribe(m, &mid, "caleon/sensor", 0);
     DBG("mqtt subscribe rc=%d mid=%d topic=caleon/sensor", sub, mid);
     sub = mosquitto_subscribe(m, &mid, "caleon/device", 0);
     DBG("mqtt subscribe rc=%d mid=%d topic=caleon/device", sub, mid);
+    sub = mosquitto_subscribe(m, &mid, "caleon/datetime", 0);
+    DBG("mqtt subscribe rc=%d mid=%d topic=caleon/datetime", sub, mid);
 }
 
 static void on_mqtt_disconnect(struct mosquitto *m, void *u, int rc) {
@@ -315,6 +361,44 @@ static void on_mqtt_msg(struct mosquitto *m, void *u, const struct mosquitto_mes
 
     if (strcmp(topic, "caleon/device") == 0) {
         handle_device_msg(p);
+        cJSON_Delete(p);
+        return;
+    }
+
+    if (strcmp(topic, "caleon/datetime") == 0) {
+        cJSON *jiso = cJSON_GetObjectItem(p, "iso8601");
+        cJSON *jy = cJSON_GetObjectItem(p, "year"), *jmo = cJSON_GetObjectItem(p, "month"), *jd = cJSON_GetObjectItem(p, "day");
+        cJSON *jh = cJSON_GetObjectItem(p, "hour"), *jmi = cJSON_GetObjectItem(p, "minute"), *js = cJSON_GetObjectItem(p, "second");
+        cJSON *jdow = cJSON_GetObjectItem(p, "dow");
+        if (cJSON_IsString(jiso) && cJSON_IsNumber(jy) && cJSON_IsNumber(jmo) && cJSON_IsNumber(jd) && cJSON_IsNumber(jh) && cJSON_IsNumber(jmi) && cJSON_IsNumber(js)) {
+            /* mktime() interprets struct tm as local time; the controller
+             * also broadcasts local time, so this skew is reasonably exact
+             * as long as both clocks are in the same zone. */
+            struct tm tmv   = { 0 };
+            tmv.tm_year     = (int)jy->valuedouble - 1900;
+            tmv.tm_mon      = (int)jmo->valuedouble - 1;
+            tmv.tm_mday     = (int)jd->valuedouble;
+            tmv.tm_hour     = (int)jh->valuedouble;
+            tmv.tm_min      = (int)jmi->valuedouble;
+            tmv.tm_sec      = (int)js->valuedouble;
+            tmv.tm_isdst    = -1;
+            time_t reported = mktime(&tmv);
+            time_t now      = time(NULL);
+            long skew       = (reported != (time_t)-1) ? (long)(reported - now) : 0;
+            int dow         = cJSON_IsNumber(jdow) ? (int)jdow->valuedouble : 0;
+            char summary[96];
+            snprintf(summary, sizeof(summary), "%s  dow=%d  skew=%s%lds", jiso->valuestring, dow, skew > 0 ? "+" : "", skew);
+            pthread_mutex_lock(&g_state_mu);
+            bool accepted = events_push_locked("datetime", summary);
+            event_t snap  = g_events[0];
+            pthread_mutex_unlock(&g_state_mu);
+            if (accepted) {
+                DBG("  -> event datetime: %s", summary);
+                broadcast_event_record(&snap);
+            } else {
+                DBG("  -> dup datetime, skipped: %s", summary);
+            }
+        }
         cJSON_Delete(p);
         return;
     }
@@ -442,23 +526,30 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "</style></head><body>"
                                 "<div class=box><h2>Rooms</h2>"
                                 "<table id=rooms><thead><tr>"
-                                "<th>idx</th><th>type</th><th>name</th>"
-                                "<th class=num>temp</th><th class=num>set</th>"
-                                "<th>mode</th><th class=num>hum</th><th class=num>age</th>"
+                                "<th>name</th><th>mode</th>"
+                                "<th class=num>temp</th><th class=num>hum</th><th class=num>set</th>"
+                                "<th class=num>age</th>"
                                 "</tr></thead><tbody></tbody></table>"
                                 "<div id=status>connecting...</div></div>"
                                 "<div class=box><h2>Devices</h2>"
                                 "<table id=devices><thead><tr>"
-                                "<th>id</th><th>name</th>"
+                                "<th>name</th><th>id</th>"
                                 "<th class=num>oem</th><th class=num>variant</th>"
                                 "<th class=num>firmware</th><th class=num>age</th>"
+                                "</tr></thead><tbody></tbody></table></div>"
+                                "<div class=box><h2>Events</h2>"
+                                "<table id=events><thead><tr>"
+                                "<th>kind</th><th>summary</th><th class=num>age</th>"
                                 "</tr></thead><tbody></tbody></table></div>"
                                 "<script>\n"
                                 "const rtbody=document.querySelector('#rooms tbody');\n"
                                 "const dtbody=document.querySelector('#devices tbody');\n"
+                                "const etbody=document.querySelector('#events tbody');\n"
                                 "const status=document.getElementById('status');\n"
                                 "const rooms=new Map();\n"
                                 "const devices=new Map();\n"
+                                "const events=[];\n"
+                                "const EV_KEEP=5;\n"
                                 "function rkey(r){return r.idx+':'+r.type}\n"
                                 "function fmt(v,u){return v==null?'<span class=absent>--</span>':v.toFixed(1)+u}\n"
                                 "function hex2(n){return '0x'+n.toString(16).toUpperCase().padStart(2,'0')}\n"
@@ -479,13 +570,11 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "  rtbody.innerHTML=ord.map(r=>{\n"
                                 "    const age=youngest(r);\n"
                                 "    return '<tr>'+\n"
-                                "      '<td>'+r.idx+'</td>'+\n"
-                                "      '<td>'+r.type+'</td>'+\n"
                                 "      '<td>'+(r.name?r.name:'<span class=absent>?</span>')+'</td>'+\n"
-                                "      '<td class=num>'+fmt(r.temp,'\\u00b0C')+'</td>'+\n"
-                                "      '<td class=num>'+fmt(r.tset,'\\u00b0C')+'</td>'+\n"
                                 "      '<td class=mode>'+(r.mode==null?'<span class=absent>--</span>':r.mode)+'</td>'+\n"
+                                "      '<td class=num>'+fmt(r.temp,'\\u00b0C')+'</td>'+\n"
                                 "      '<td class=num>'+fmt(r.humidity,'%')+'</td>'+\n"
+                                "      '<td class=num>'+fmt(r.tset,'\\u00b0C')+'</td>'+\n"
                                 "      '<td class=age>'+ageFmt(age)+'</td>'+\n"
                                 "    '</tr>';\n"
                                 "  }).join('');\n"
@@ -494,8 +583,8 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "  const ord=[...devices.values()].sort((a,b)=>a.subscriber_id-b.subscriber_id);\n"
                                 "  dtbody.innerHTML=ord.map(d=>{\n"
                                 "    return '<tr>'+\n"
-                                "      '<td>'+hex2(d.subscriber_id)+'</td>'+\n"
                                 "      '<td>'+(d.subscriber_name||'<span class=absent>?</span>')+'</td>'+\n"
+                                "      '<td>'+hex2(d.subscriber_id)+'</td>'+\n"
                                 "      '<td class=num>'+hex2(d.oem_id||0)+'</td>'+\n"
                                 "      '<td class=num>'+(d.device_variant!=null?d.device_variant:'--')+'</td>'+\n"
                                 "      '<td class=num>'+(d.firmware!=null?d.firmware:'--')+'</td>'+\n"
@@ -503,7 +592,16 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "    '</tr>';\n"
                                 "  }).join('');\n"
                                 "}\n"
-                                "function render(){renderRooms();renderDevices();}\n"
+                                "function renderEvents(){\n"
+                                "  etbody.innerHTML=events.map(e=>{\n"
+                                "    return '<tr>'+\n"
+                                "      '<td>'+(e.kind||'?')+'</td>'+\n"
+                                "      '<td>'+(e.summary||'')+'</td>'+\n"
+                                "      '<td class=age>'+ageFmt(e.age)+'</td>'+\n"
+                                "    '</tr>';\n"
+                                "  }).join('');\n"
+                                "}\n"
+                                "function render(){renderRooms();renderDevices();renderEvents();}\n"
                                 "function mergeRoom(r){\n"
                                 "  const k=rkey(r);const cur=rooms.get(k)||{idx:r.idx,type:r.type};\n"
                                 "  for(const f of ['name','temp','tset','humidity','mode','swval'])\n"
@@ -518,11 +616,18 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "    if(f in d) cur[f]=d[f];\n"
                                 "  devices.set(d.subscriber_id,cur);\n"
                                 "}\n"
+                                "function mergeEvent(e){\n"
+                                "  /* dedupe identical to head: same kind+summary */\n"
+                                "  if(events.length && events[0].kind===e.kind && events[0].summary===e.summary) return;\n"
+                                "  events.unshift({...e});\n"
+                                "  if(events.length>EV_KEEP) events.length=EV_KEEP;\n"
+                                "}\n"
                                 "function tick(){\n"
                                 "  for(const r of rooms.values())\n"
                                 "    for(const f of ['age_temp','age_tset','age_hum','age_sw'])\n"
                                 "      if(r[f]!=null) r[f]+=1;\n"
                                 "  for(const d of devices.values()) if(d.age!=null) d.age+=1;\n"
+                                "  for(const e of events) if(e.age!=null) e.age+=1;\n"
                                 "  render();\n"
                                 "}\n"
                                 "setInterval(tick,1000);\n"
@@ -534,10 +639,14 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "    const o=JSON.parse(e.data);\n"
                                 "    (o.rooms||[]).forEach(mergeRoom);\n"
                                 "    (o.devices||[]).forEach(mergeDevice);\n"
+                                "    /* events arrive newest-first; replay in reverse so unshift\n"
+                                "       ordering ends up matching the server. */\n"
+                                "    (o.events||[]).slice().reverse().forEach(mergeEvent);\n"
                                 "    render();\n"
                                 "  });\n"
                                 "  es.addEventListener('room',e=>{mergeRoom(JSON.parse(e.data));render()});\n"
                                 "  es.addEventListener('device',e=>{mergeDevice(JSON.parse(e.data));render()});\n"
+                                "  es.addEventListener('event',e=>{mergeEvent(JSON.parse(e.data));render()});\n"
                                 "}\n"
                                 "connect();\n"
                                 "</script></body></html>";
@@ -598,12 +707,20 @@ static void start_sse(int fd) {
     cJSON *snapo = cJSON_CreateObject();
     cJSON *rarr  = cJSON_CreateArray();
     cJSON *darr  = cJSON_CreateArray();
+    cJSON *earr  = cJSON_CreateArray();
     for (int i = 0; i < g_nrooms; i++)
         cJSON_AddItemToArray(rarr, room_to_json(&g_rooms[i], now));
     for (int i = 0; i < g_ndevices; i++)
         cJSON_AddItemToArray(darr, device_to_json(&g_devices[i], now));
+    int en = 0;
+    for (int i = 0; i < MAX_EVENTS; i++)
+        if (g_events[i].used) {
+            cJSON_AddItemToArray(earr, event_to_json(&g_events[i], now));
+            en++;
+        }
     cJSON_AddItemToObject(snapo, "rooms", rarr);
     cJSON_AddItemToObject(snapo, "devices", darr);
+    cJSON_AddItemToObject(snapo, "events", earr);
     int rn = g_nrooms, dn = g_ndevices;
     pthread_mutex_unlock(&g_state_mu);
 
@@ -621,7 +738,7 @@ static void start_sse(int fd) {
     pthread_mutex_lock(&g_clients_mu);
     if (g_nclients < MAX_CLIENTS) {
         g_clients[g_nclients++] = fd;
-        DBG("sse client connected fd=%d snapshot_rooms=%d snapshot_devices=%d total_clients=%d", fd, rn, dn, g_nclients);
+        DBG("sse client connected fd=%d snapshot_rooms=%d snapshot_devices=%d snapshot_events=%d total_clients=%d", fd, rn, dn, en, g_nclients);
     } else {
         DBG("sse client rejected (MAX_CLIENTS=%d)", MAX_CLIENTS);
         close(fd);

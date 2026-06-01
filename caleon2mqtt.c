@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -61,6 +62,11 @@ typedef struct {
 
     char debug_capture_all[256];     /* "debug.capture_all"     -- write every frame's trace here */
     char debug_capture_unknown[256]; /* "debug.capture_unknown" -- write only undecoded frames here */
+
+    int scbi_subscriber_id;          /* "scbi.subscriber_id" -- our id when sending; default 0xA5 */
+
+    int poll_datetime_secs;          /* "polling.datetime"   -- 0 means disabled */
+    int poll_deviceinfo_secs;        /* "polling.deviceinfo" -- 0 means disabled */
 } config_t;
 
 static config_t g_cfg;
@@ -78,6 +84,18 @@ typedef struct {
     size_t len, cap;
 } sbuf_t;
 static sbuf_t g_frame_buf;
+
+/* Set true by code paths that didn't fully recognise the current frame --
+ * specifically print_payload_raw() fallbacks and the default-case in the
+ * top-level decode() dispatch. Reset at the start of every decode(). When
+ * the dust settles, frame_flush() uses this to decide whether the frame
+ * goes to capture_unknown.
+ *
+ * Important: this is *frame-level recognition*, not "did we emit MQTT".
+ * Our own outgoing CONTROLLER MSG_REQUESTs and the request-side of any
+ * known program have a known format and don't need to clutter
+ * capture_unknown even though they produce no MQTT event. */
+static bool g_frame_unrecognised = false;
 
 static inline bool capture_active(void) { return g_debug || g_cap_all || g_cap_unknown; }
 
@@ -186,6 +204,57 @@ static void cfg_defaults(void) {
     g_cfg.mqtt_retain_sensors = false;
     strncpy(g_cfg.mqtt_topic, "caleon", sizeof(g_cfg.mqtt_topic) - 1);
     snprintf(g_cfg.mqtt_client_id, sizeof(g_cfg.mqtt_client_id), "caleon2mqtt-%d", (int)getpid());
+    g_cfg.scbi_subscriber_id = 0xA5;
+}
+
+/* Parse a duration string like "5m", "2h", "2h5m", "5d", "5d12h3m", "300"
+ * into seconds. A trailing bare number is treated as seconds. Returns -1
+ * on a syntax error, 0 if the input is empty. */
+static int parse_duration_secs(const char *s) {
+    if (!s)
+        return 0;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (!*s)
+        return 0;
+    long total = 0, n = 0;
+    bool seen_digit = false;
+    for (; *s; s++) {
+        if (*s >= '0' && *s <= '9') {
+            n         = n * 10 + (*s - '0');
+            seen_digit = true;
+        } else {
+            long mul = 0;
+            switch (*s) {
+            case 'd':
+            case 'D':
+                mul = 86400;
+                break;
+            case 'h':
+            case 'H':
+                mul = 3600;
+                break;
+            case 'm':
+            case 'M':
+                mul = 60;
+                break;
+            case 's':
+            case 'S':
+                mul = 1;
+                break;
+            default:
+                return -1;
+            }
+            if (!seen_digit)
+                return -1;
+            total += n * mul;
+            n          = 0;
+            seen_digit = false;
+        }
+    }
+    if (seen_digit)
+        total += n; /* trailing bare number = seconds */
+    return (total > INT_MAX) ? INT_MAX : (int)total;
 }
 
 static int cfg_load(const char *path) {
@@ -235,6 +304,52 @@ static int cfg_load(const char *path) {
             strncpy(g_cfg.debug_capture_all, s, sizeof(g_cfg.debug_capture_all) - 1);
         if ((s = json_str(d, "capture_unknown", NULL)))
             strncpy(g_cfg.debug_capture_unknown, s, sizeof(g_cfg.debug_capture_unknown) - 1);
+    }
+
+    cJSON *scbi = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "scbi");
+    if (scbi) {
+        cJSON *sid = cJSON_GetObjectItemCaseSensitive(scbi, "subscriber_id");
+        if (cJSON_IsNumber(sid)) {
+            g_cfg.scbi_subscriber_id = sid->valueint & 0xFF;
+        } else if (cJSON_IsString(sid)) {
+            /* accept "0xA5" or "165" string form */
+            const char *str = sid->valuestring;
+            g_cfg.scbi_subscriber_id = (int)strtol(str, NULL, 0) & 0xFF;
+        }
+    }
+
+    /* polling: each key enables that poll. Value is a duration string like
+     * "12h" / "30m" / "5d12h3m" / "300". An explicit null or empty string
+     * defaults to 12h. Floor at 5m to avoid hammering the bus. */
+    cJSON *pol = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "polling");
+    if (pol) {
+        const int dflt = 12 * 3600, minp = 5 * 60;
+        struct {
+            const char *key;
+            int *out;
+        } slots[] = {
+            { "datetime", &g_cfg.poll_datetime_secs },
+            { "deviceinfo", &g_cfg.poll_deviceinfo_secs },
+        };
+        for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
+            cJSON *v = cJSON_GetObjectItemCaseSensitive(pol, slots[i].key);
+            if (!v)
+                continue;
+            int secs = dflt;
+            if (cJSON_IsString(v) && v->valuestring && v->valuestring[0]) {
+                int p = parse_duration_secs(v->valuestring);
+                if (p < 0) {
+                    fprintf(stderr, "config: polling.%s: bad duration '%s' -- using default 12h\n", slots[i].key, v->valuestring);
+                } else if (p > 0) {
+                    secs = p;
+                }
+            }
+            if (secs < minp) {
+                fprintf(stderr, "config: polling.%s: %ds < 5m floor -- clamped to 5m\n", slots[i].key, secs);
+                secs = minp;
+            }
+            *slots[i].out = secs;
+        }
     }
     return 0;
 }
@@ -359,6 +474,29 @@ static int can_open(const char *iface) {
     return s;
 }
 
+/* Build a 29-bit SCBI address ID from its component fields. */
+static uint32_t scbi_id(uint8_t msg_type, uint8_t proto, uint8_t fn, uint8_t sid, uint8_t prog) {
+    return ((uint32_t)(msg_type & 3) << 27) | ((uint32_t)(proto & 7) << 24) | ((uint32_t)fn << 16) | ((uint32_t)sid << 8) | (uint32_t)prog;
+}
+
+/* Send a CONTROLLER (0x0B) MSG_REQUEST with our subscriber id in the
+ * address and the target controller id in data[0]. 0x00 = broadcast.
+ * Returns 0 on success, -1 on write failure. */
+static int can_send_controller_request(int sock, uint8_t our_sid, uint8_t fn, uint8_t target) {
+    struct can_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.can_id  = scbi_id(0 /*REQUEST*/, 0 /*CAN_FORMAT_0*/, fn, our_sid, 0x0B /*CONTROLLER*/) | CAN_EFF_FLAG;
+    frame.can_dlc = 1;
+    frame.data[0] = target;
+    ssize_t n = write(sock, &frame, sizeof(frame));
+    if (n != (ssize_t)sizeof(frame)) {
+        fprintf(stderr, "can: send fn=0x%02X target=0x%02X failed: %s\n", fn, target, strerror(errno));
+        return -1;
+    }
+    fprintf(stderr, "can: poll fn=0x%02X target=0x%02X from=0x%02X\n", fn, target, our_sid);
+    return 0;
+}
+
 /* ----------------------------------------------------- protocol dictionary */
 
 typedef struct {
@@ -405,6 +543,11 @@ static const char *prog_name(uint8_t p) {
         return "DATALOGGER_NAMEDSENSORS"; /* aka REMOTESENSOR (compat) */
     case 0x85:
         return "HCC"; /* heating circuit control */
+    case 0x87:
+        return "SYSTEM_DATETIME"; /* undocumented; periodic     */
+                                  /* broadcast of controller    */
+                                  /* clock. fn=0 payload is     */
+                                  /* yearLE, mo, d, h, m, s, dow*/
     case 0x8B:
         return "HEATINGCONTROL"; /* see comment above */
     case 0x8C:
@@ -651,11 +794,14 @@ static void print_prefix(const frame_t *f) {
          f->program_type, f->subscriber_id, f->function_type, f->protocol_type, f->message_type);
 }
 
+/* print_payload_raw is the universal "decoder didn't know what to do with
+ * this" fallback. Hitting it == frame format unrecognised. */
 static void print_payload_raw(const frame_t *f, const char *label) {
     DBGP(" ... %s: ", label);
     for (int i = 0; i < f->dlc; i++)
         DBGP("0x%02X ", f->data[i]);
     DBGP("\n");
+    g_frame_unrecognised = true;
 }
 
 /* --------------------------------------------------------- JSON assemblers */
@@ -722,11 +868,62 @@ static cJSON *decode_controller(const frame_t *f, const char **subtopic, bool *r
         cJSON_AddNumberToObject(e, "device_variant", var);
         *subtopic = (f->function_type == 0x01) ? "heartbeat" : "reset";
         *retain   = false;
+    } else if (f->message_type == 0 /* MSG_REQUEST */ && strcmp(fn, "UNKNOWN") != 0) {
+        /* Recognised CONTROLLER request -- our own polling sends one (and
+         * real controllers send these too). Body convention is
+         * data[0] = target subscriber id (or 0 = broadcast/unspecified).
+         * No MQTT event is emitted; marking it recognised keeps it out of
+         * the capture_unknown log. */
+        uint8_t target = (f->dlc > 0) ? f->data[0] : 0;
+        DBGP(" ... Request: target=0x%02X\n", target);
     } else if (f->dlc > 0) {
         print_payload_raw(f, "Payload");
     } else {
         DBGP("\n");
     }
+    return e;
+}
+
+/* SYSTEM_DATETIME (0x87) -- undocumented in SCBI rev11 but observed in the
+ * wild: program=0x87, subscriber_id=0x00 (broadcast), function_type=0,
+ * message_type=2 (response), 8 bytes:
+ *   data[0..1] = year (little-endian u16, e.g. 0x07EA = 2026)
+ *   data[2]    = month (1..12)
+ *   data[3]    = day   (1..31)
+ *   data[4]    = hour  (0..23)
+ *   data[5]    = minute(0..59)
+ *   data[6]    = second(0..59)
+ *   data[7]    = day-of-week (1=Mon..7=Sun, tentative)
+ * Two frames typically arrive in quick succession with a ~5s skew -- likely
+ * two devices each broadcasting their own clock. */
+static cJSON *decode_system_datetime(const frame_t *f, const char **subtopic, bool *retain) {
+    DBGP(" ... SYSTEM_DATETIME (0x87): Function=0x%02X, MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
+    if (f->function_type != 0x00 || f->dlc < 8) {
+        if (f->dlc > 0)
+            print_payload_raw(f, "Payload");
+        else
+            DBGP("\n");
+        return NULL;
+    }
+    uint16_t year = (uint16_t)(f->data[0] | (f->data[1] << 8));
+    uint8_t mo = f->data[2], d = f->data[3], h = f->data[4], mi = f->data[5], s = f->data[6], dow = f->data[7];
+    DBGP(" ... DateTime: %04u-%02u-%02u %02u:%02u:%02u (dow=%u)\n", year, mo, d, h, mi, s, dow);
+
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddStringToObject(e, "type", "system_datetime");
+    json_common(e, f);
+    cJSON_AddNumberToObject(e, "year", year);
+    cJSON_AddNumberToObject(e, "month", mo);
+    cJSON_AddNumberToObject(e, "day", d);
+    cJSON_AddNumberToObject(e, "hour", h);
+    cJSON_AddNumberToObject(e, "minute", mi);
+    cJSON_AddNumberToObject(e, "second", s);
+    cJSON_AddNumberToObject(e, "dow", dow);
+    char iso[32];
+    snprintf(iso, sizeof(iso), "%04u-%02u-%02uT%02u:%02u:%02u", year, mo, d, h, mi, s);
+    cJSON_AddStringToObject(e, "iso8601", iso);
+    *subtopic = "datetime";
+    *retain   = true; /* slow-changing, useful to have latest on (re)subscribe */
     return e;
 }
 
@@ -1000,8 +1197,36 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
         *subtopic = "hc/relay";
     } else if (f->function_type == 0x00) {
         print_payload_raw(f, "Status");
-    } else if (f->function_type == 0x08) {
-        print_payload_raw(f, "Config");
+    } else if (f->function_type == 0x08 && f->dlc >= 4) {
+        /* DLG_HYDRAULIK_CONFIG: same ASCII-label trick as DLF_RELAY --
+         * bytes 2..3 carry the input tag (observed "N2" / "N5"). byte 0
+         * is a config index, byte 1 a flag (0x04 seen). bytes 4..7 carry
+         * configured parameter data -- bytes 4..6 zero in our capture,
+         * byte 7 a small integer (e.g. 0x19 = 25 -- possibly a duty
+         * setpoint, TBC). Surfaced so it can be diffed across captures. */
+        uint8_t cno   = f->data[0];
+        uint8_t flag  = f->data[1];
+        char label[3] = { (char)f->data[2], (f->data[3]) ? (char)f->data[3] : '\0', '\0' };
+        DBGP(" ... Config: Number=0x%02X, Flag=0x%02X, Label=\"%s\"", cno, flag, label);
+        if (f->dlc > 4) {
+            DBGP(", Extra=");
+            for (int i = 4; i < f->dlc; i++)
+                DBGP("%02X", f->data[i]);
+        }
+        DBGP("\n");
+
+        e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "type", "hc_config");
+        cJSON_AddStringToObject(e, "function", fn);
+        json_common(e, f);
+        cJSON_AddNumberToObject(e, "config_no", cno);
+        cJSON_AddNumberToObject(e, "flag", flag);
+        cJSON_AddStringToObject(e, "label", label);
+        cJSON *extra = cJSON_CreateArray();
+        for (int i = 4; i < f->dlc; i++)
+            cJSON_AddItemToArray(extra, cJSON_CreateNumber(f->data[i]));
+        cJSON_AddItemToObject(e, "extra", extra);
+        *subtopic = "hc/config";
     } else if (f->dlc > 0) {
         print_payload_raw(f, "Payload");
     } else {
@@ -1013,8 +1238,9 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
 /* ----------------------------------------------------- top-level dispatch */
 
 static cJSON *decode(const frame_t *f, const char **subtopic, bool *retain) {
-    *subtopic = NULL;
-    *retain   = false;
+    *subtopic            = NULL;
+    *retain              = false;
+    g_frame_unrecognised = false;
     print_prefix(f);
     switch (f->program_type) {
     case 0x0B:
@@ -1023,12 +1249,15 @@ static cJSON *decode(const frame_t *f, const char **subtopic, bool *retain) {
         return decode_remotesensor(f, subtopic, retain);
     case 0x84:
         return decode_namedsensor(f, subtopic, retain);
+    case 0x87:
+        return decode_system_datetime(f, subtopic, retain);
     case 0x8B:
         return decode_heatingcontrol(f, subtopic, retain);
     case 0x90:
         return decode_paramsync(f, subtopic, retain);
     default:
         DBGP("\n");
+        g_frame_unrecognised = true;
         return NULL;
     }
 }
@@ -1106,6 +1335,24 @@ int main(int argc, char **argv) {
     if (mqtt_init() < 0)
         fprintf(stderr, "mqtt: continuing without publish\n");
 
+    /* Polling: fire each enabled request once at startup -- the CAN socket
+     * is already bound and the kernel will buffer responses while we're
+     * still inside this section, so the main loop catches them on its
+     * first iteration. Track the next-due time per slot afterwards. */
+    uint8_t my_sid           = (uint8_t)(g_cfg.scbi_subscriber_id & 0xFF);
+    time_t now0              = time(NULL);
+    time_t next_datetime_due = 0, next_deviceinfo_due = 0;
+    if (g_cfg.poll_datetime_secs > 0) {
+        fprintf(stderr, "polling: GET_SYSTEM_DATE_TIME every %ds (from SID 0x%02X)\n", g_cfg.poll_datetime_secs, my_sid);
+        can_send_controller_request(s, my_sid, 0x06 /*GET_SYSTEM_DATE_TIME*/, 0x00);
+        next_datetime_due = now0 + g_cfg.poll_datetime_secs;
+    }
+    if (g_cfg.poll_deviceinfo_secs > 0) {
+        fprintf(stderr, "polling: DEVICE_INFO every %ds (from SID 0x%02X)\n", g_cfg.poll_deviceinfo_secs, my_sid);
+        can_send_controller_request(s, my_sid, 0x14 /*DEVICE_INFO*/, 0x00);
+        next_deviceinfo_due = now0 + g_cfg.poll_deviceinfo_secs;
+    }
+
     while (g_run) {
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -1118,6 +1365,18 @@ int main(int argc, char **argv) {
             perror("select");
             break;
         }
+
+        /* Polling tick. The 1s select timeout caps the granularity. */
+        time_t nowt = time(NULL);
+        if (next_datetime_due && nowt >= next_datetime_due) {
+            can_send_controller_request(s, my_sid, 0x06, 0x00);
+            next_datetime_due = nowt + g_cfg.poll_datetime_secs;
+        }
+        if (next_deviceinfo_due && nowt >= next_deviceinfo_due) {
+            can_send_controller_request(s, my_sid, 0x14, 0x00);
+            next_deviceinfo_due = nowt + g_cfg.poll_deviceinfo_secs;
+        }
+
         if (r == 0 || !FD_ISSET(s, &rfds))
             continue;
 
@@ -1143,7 +1402,7 @@ int main(int argc, char **argv) {
         const char *subtopic = NULL;
         bool retain          = false;
         cJSON *evt           = decode(&f, &subtopic, &retain);
-        frame_flush(/*unknown=*/evt == NULL);
+        frame_flush(/*unknown=*/g_frame_unrecognised);
         if (g_debug)
             fflush(stdout);
         if (evt) {
