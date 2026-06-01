@@ -84,6 +84,18 @@ reverse-engineering can continue.
   `/etc/default/caleon2mqtt` (see [Makefile](#makefile) for the host-specific
   override). Enable with `systemctl daemon-reload && systemctl enable --now
   caleon2mqtt`.
+- Frame capture: an optional `debug` section in the config takes two
+  filenames, both producing the same text as the `--debug` stdout trace and
+  independent of the `--debug` flag:
+  - `capture_all` — every frame
+  - `capture_unknown` — only frames the decoder produced no MQTT event for
+    (unrecognised program type, unhandled function/message, or intentional
+    `MSG_REQUEST`)
+  Useful for continuing reverse engineering under a long-running service —
+  point `capture_unknown` at a log and let unfamiliar traffic accumulate.
+  Files open in append mode and are line-buffered; rotate with logrotate.
+  The `caleon2mqtt.cfg` in the repo has an `_debug` example block; rename
+  to `debug` to enable.
 
 ## caleon-web
 

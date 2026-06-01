@@ -176,13 +176,14 @@ function render() {
 
     /* devices + flow */
     lines = [];
-    lines.push('{bold}{white-fg} addr  name              oem  var  age{/}{/bold}');
+    lines.push('{bold}{white-fg} addr  name              oem  var    fw   age{/}{/bold}');
     for (const [id, d] of [...state.devices.entries()].sort()) {
         lines.push(
             ` 0x${id.toString(16).padStart(2, '0').toUpperCase()}  ` +
                 `{yellow-fg}${(d.name || '?').padEnd(14)}{/yellow-fg}` +
                 `  0x${(d.oem ?? 0).toString(16).padStart(2, '0').toUpperCase()}` +
                 `  0x${(d.variant ?? 0).toString(16).padStart(2, '0').toUpperCase()}` +
+                `  ${d.firmware != null ? String(d.firmware).padStart(5) : '   --'}` +
                 `  ${ageStr(d.ts)}`
         );
     }
@@ -288,6 +289,8 @@ mqttClient.on('message', (topic, buf) => {
         preview = `rno=${m.relay_no}${m.name ? '(' + m.name + ')' : ''} mode=0x${(m.mode || 0).toString(16).toUpperCase()} raw=${m.value_raw}`;
     } else if (t === 'heartbeat') {
         preview = `dev=0x${(m.device_subscriber_id || 0).toString(16).toUpperCase()} oem=0x${(m.oem_id || 0).toString(16).toUpperCase()} var=0x${(m.device_variant || 0).toString(16).toUpperCase()}`;
+    } else if (t === 'device_info') {
+        preview = `dev=0x${(m.subscriber_id || 0).toString(16).toUpperCase()} oem=0x${(m.oem_id || 0).toString(16).toUpperCase()} var=0x${(m.device_variant || 0).toString(16).toUpperCase()} fw=${m.firmware}`;
     } else {
         preview = JSON.stringify(m).slice(0, 80);
     }
@@ -344,8 +347,11 @@ mqttClient.on('message', (topic, buf) => {
         });
     } else if (t === 'heartbeat') {
         const id = m.device_subscriber_id;
+        const prev = state.devices.get(id) || {};
         state.devices.set(id, {
+            ...prev,
             name:
+                prev.name ||
                 (cfg.subscribers &&
                     (cfg.subscribers[`0x${id.toString(16).padStart(2, '0').toUpperCase()}`] || cfg.subscribers[`0x${id.toString(16).padStart(2, '0')}`])) ||
                 '',
@@ -353,6 +359,28 @@ mqttClient.on('message', (topic, buf) => {
             variant: m.device_variant,
             ts: tstamp,
         });
+    } else if (t === 'device_info') {
+        /* DEVICE_INFO request frames carry firmware=0; ignore them and
+         * only update on the actual response which has the real version. */
+        if (!m.firmware) {
+            // pass through to log tail only
+        } else {
+            const id = m.subscriber_id;
+            const prev = state.devices.get(id) || {};
+            state.devices.set(id, {
+                ...prev,
+                name:
+                    m.subscriber_name ||
+                    prev.name ||
+                    (cfg.subscribers &&
+                        (cfg.subscribers[`0x${id.toString(16).padStart(2, '0').toUpperCase()}`] || cfg.subscribers[`0x${id.toString(16).padStart(2, '0')}`])) ||
+                    '',
+                oem: m.oem_id ?? prev.oem,
+                variant: m.device_variant ?? prev.variant,
+                firmware: m.firmware,
+                ts: tstamp,
+            });
+        }
     } else {
         state.unknown++;
     }

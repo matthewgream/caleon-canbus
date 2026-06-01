@@ -58,24 +58,71 @@ typedef struct {
     cJSON *subscribers; /* "subscribers": { "0xNN": "name" }     */
     cJSON *hc_sensors;  /* "hc_sensors" : { "<no>": "name" }     */
     cJSON *hc_relays;   /* "hc_relays"  : { "<no>": "name" }     */
+
+    char debug_capture_all[256];     /* "debug.capture_all"     -- write every frame's trace here */
+    char debug_capture_unknown[256]; /* "debug.capture_unknown" -- write only undecoded frames here */
 } config_t;
 
 static config_t g_cfg;
 static volatile sig_atomic_t g_run = 1;
 static bool g_debug                = false;
+static FILE *g_cap_all             = NULL;
+static FILE *g_cap_unknown         = NULL;
 
-/* Verbose per-frame decoder trace -- gated by --debug. When off the
- * program runs silent on stdout (still emits errors and lifecycle
- * lines on stderr) so it is safe to run as a systemd service. */
-static inline void dbg_out(const char *fmt, ...) {
-    if (!g_debug)
+/* The per-frame trace is accumulated into a buffer, then routed to whichever
+ * sinks are active after decode returns. This keeps stdout, capture-all and
+ * capture-unknown all consistent (no interleaving) and lets us decide which
+ * frames count as "unknown" only after the decoder has run. */
+typedef struct {
+    char *buf;
+    size_t len, cap;
+} sbuf_t;
+static sbuf_t g_frame_buf;
+
+static inline bool capture_active(void) { return g_debug || g_cap_all || g_cap_unknown; }
+
+__attribute__((format(printf, 1, 2))) static void dbg_out(const char *fmt, ...) {
+    if (!capture_active())
         return;
-    va_list ap;
+    va_list ap, ap2;
     va_start(ap, fmt);
-    vfprintf(stdout, fmt, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap2);
+    va_end(ap2);
+    if (n <= 0) {
+        va_end(ap);
+        return;
+    }
+    size_t need = g_frame_buf.len + (size_t)n + 1;
+    if (need > g_frame_buf.cap) {
+        size_t nc = g_frame_buf.cap ? g_frame_buf.cap : 512;
+        while (nc < need)
+            nc *= 2;
+        char *nb = realloc(g_frame_buf.buf, nc);
+        if (!nb) {
+            va_end(ap);
+            return;
+        }
+        g_frame_buf.buf = nb;
+        g_frame_buf.cap = nc;
+    }
+    vsnprintf(g_frame_buf.buf + g_frame_buf.len, g_frame_buf.cap - g_frame_buf.len, fmt, ap);
+    g_frame_buf.len += (size_t)n;
     va_end(ap);
 }
 #define DBGP(...) dbg_out(__VA_ARGS__)
+
+static void frame_flush(bool unknown) {
+    if (g_frame_buf.len == 0)
+        return;
+    if (g_debug)
+        fwrite(g_frame_buf.buf, 1, g_frame_buf.len, stdout);
+    if (g_cap_all)
+        fwrite(g_frame_buf.buf, 1, g_frame_buf.len, g_cap_all);
+    if (g_cap_unknown && unknown)
+        fwrite(g_frame_buf.buf, 1, g_frame_buf.len, g_cap_unknown);
+    g_frame_buf.len = 0;
+}
 
 static void on_signal(__attribute__((unused)) int sig) { g_run = 0; }
 
@@ -180,6 +227,15 @@ static int cfg_load(const char *path) {
     g_cfg.subscribers = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "subscribers");
     g_cfg.hc_sensors  = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "hc_sensors");
     g_cfg.hc_relays   = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "hc_relays");
+
+    cJSON *d = cJSON_GetObjectItemCaseSensitive(g_cfg.root, "debug");
+    if (d) {
+        const char *s;
+        if ((s = json_str(d, "capture_all", NULL)))
+            strncpy(g_cfg.debug_capture_all, s, sizeof(g_cfg.debug_capture_all) - 1);
+        if ((s = json_str(d, "capture_unknown", NULL)))
+            strncpy(g_cfg.debug_capture_unknown, s, sizeof(g_cfg.debug_capture_unknown) - 1);
+    }
     return 0;
 }
 
@@ -510,17 +566,20 @@ static bool ecs_is_absent(int16_t v) { return v <= -30000; }
  * raw  binary  app mode
  *   2  0010    regular
  *   8  1000    comfort
+ *   9  1001    holiday
  *  10  1010    eco
  *  15  1111    off       (frost protection)
  *
- * All four user-facing app modes captured. Encoding doesn't reduce to a
- * clean bitmask so we keep it as an opaque enum. */
+ * Five user-facing app modes captured. Encoding doesn't reduce to a clean
+ * bitmask so we keep it as an opaque enum. */
 static const char *rc_switch_mode_name(int v) {
     switch (v) {
     case 2:
         return "regular";
     case 8:
         return "comfort";
+    case 9:
+        return "holiday";
     case 10:
         return "eco";
     case 15:
@@ -1023,6 +1082,25 @@ int main(int argc, char **argv) {
         return 1;
     fprintf(stderr, "can: listening on %s\n", g_cfg.can_iface);
 
+    if (g_cfg.debug_capture_all[0]) {
+        g_cap_all = fopen(g_cfg.debug_capture_all, "a");
+        if (g_cap_all) {
+            setvbuf(g_cap_all, NULL, _IOLBF, 0);
+            fprintf(stderr, "debug: capturing all frames to %s\n", g_cfg.debug_capture_all);
+        } else {
+            fprintf(stderr, "debug: cannot open capture_all '%s': %s\n", g_cfg.debug_capture_all, strerror(errno));
+        }
+    }
+    if (g_cfg.debug_capture_unknown[0]) {
+        g_cap_unknown = fopen(g_cfg.debug_capture_unknown, "a");
+        if (g_cap_unknown) {
+            setvbuf(g_cap_unknown, NULL, _IOLBF, 0);
+            fprintf(stderr, "debug: capturing unknown frames to %s\n", g_cfg.debug_capture_unknown);
+        } else {
+            fprintf(stderr, "debug: cannot open capture_unknown '%s': %s\n", g_cfg.debug_capture_unknown, strerror(errno));
+        }
+    }
+
     /* MQTT is best-effort: if the broker is down we still want the debug
      * stdout log so reverse-engineering can continue. */
     if (mqtt_init() < 0)
@@ -1061,10 +1139,13 @@ int main(int argc, char **argv) {
         f.protocol_type = (f.can_eff_id >> 24) & 0x07;
         f.message_type  = (f.can_eff_id >> 27) & 0x03;
 
+        g_frame_buf.len      = 0;
         const char *subtopic = NULL;
         bool retain          = false;
         cJSON *evt           = decode(&f, &subtopic, &retain);
-        fflush(stdout);
+        frame_flush(/*unknown=*/evt == NULL);
+        if (g_debug)
+            fflush(stdout);
         if (evt) {
             mqtt_publish(subtopic, evt, retain);
             cJSON_Delete(evt);
@@ -1072,6 +1153,11 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stderr, "shutting down\n");
+    if (g_cap_all)
+        fclose(g_cap_all);
+    if (g_cap_unknown)
+        fclose(g_cap_unknown);
+    free(g_frame_buf.buf);
     mqtt_shutdown();
     close(s);
     if (g_cfg.root)

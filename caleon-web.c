@@ -407,8 +407,23 @@ out:
 
 /* -------------------------------------------------------------- http side */
 
+/* Inline SVG favicon -- a red towel/heating rail: two vertical posts with
+ * five horizontal rungs. Served from /favicon.svg and referenced from the
+ * HTML <head>. */
+static const char FAVICON_SVG[] = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+                                  "<g stroke='#d33' stroke-width='6' stroke-linecap='round' fill='none'>"
+                                  "<line x1='14' y1='6'  x2='14' y2='58'/>"
+                                  "<line x1='50' y1='6'  x2='50' y2='58'/>"
+                                  "<line x1='10' y1='14' x2='54' y2='14'/>"
+                                  "<line x1='10' y1='24' x2='54' y2='24'/>"
+                                  "<line x1='10' y1='34' x2='54' y2='34'/>"
+                                  "<line x1='10' y1='44' x2='54' y2='44'/>"
+                                  "<line x1='10' y1='54' x2='54' y2='54'/>"
+                                  "</g></svg>";
+
 static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>"
                                 "<title>caleon</title>"
+                                "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
                                 "<style>"
                                 "body{font:14px/1.4 -apple-system,Helvetica,Arial,sans-serif;"
                                 "background:#111;color:#ddd;margin:0;padding:1.2em}"
@@ -447,6 +462,14 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "function rkey(r){return r.idx+':'+r.type}\n"
                                 "function fmt(v,u){return v==null?'<span class=absent>--</span>':v.toFixed(1)+u}\n"
                                 "function hex2(n){return '0x'+n.toString(16).toUpperCase().padStart(2,'0')}\n"
+                                "function ageFmt(s){\n"
+                                "  if(s==null) return '--';\n"
+                                "  const dt=Math.max(0,Math.floor(s));\n"
+                                "  if(dt<60) return dt+'s';\n"
+                                "  if(dt<3600) return Math.floor(dt/60)+'m';\n"
+                                "  if(dt<86400) return Math.floor(dt/3600)+'h';\n"
+                                "  return Math.floor(dt/86400)+'d';\n"
+                                "}\n"
                                 "function youngest(r){\n"
                                 "  const v=[r.age_temp,r.age_tset,r.age_hum,r.age_sw].filter(x=>x!=null);\n"
                                 "  return v.length?Math.min.apply(null,v):null;\n"
@@ -463,7 +486,7 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "      '<td class=num>'+fmt(r.tset,'\\u00b0C')+'</td>'+\n"
                                 "      '<td class=mode>'+(r.mode==null?'<span class=absent>--</span>':r.mode)+'</td>'+\n"
                                 "      '<td class=num>'+fmt(r.humidity,'%')+'</td>'+\n"
-                                "      '<td class=age>'+(age==null?'--':Math.round(age)+'s')+'</td>'+\n"
+                                "      '<td class=age>'+ageFmt(age)+'</td>'+\n"
                                 "    '</tr>';\n"
                                 "  }).join('');\n"
                                 "}\n"
@@ -476,7 +499,7 @@ static const char HTML_PAGE[] = "<!doctype html><html><head><meta charset=utf-8>
                                 "      '<td class=num>'+hex2(d.oem_id||0)+'</td>'+\n"
                                 "      '<td class=num>'+(d.device_variant!=null?d.device_variant:'--')+'</td>'+\n"
                                 "      '<td class=num>'+(d.firmware!=null?d.firmware:'--')+'</td>'+\n"
-                                "      '<td class=age>'+(d.age==null?'--':Math.round(d.age)+'s')+'</td>'+\n"
+                                "      '<td class=age>'+ageFmt(d.age)+'</td>'+\n"
                                 "    '</tr>';\n"
                                 "  }).join('');\n"
                                 "}\n"
@@ -537,6 +560,19 @@ static void send_html(int fd) {
                         sizeof(HTML_PAGE) - 1);
     sse_write(fd, hdr, (size_t)hlen);
     sse_write(fd, HTML_PAGE, sizeof(HTML_PAGE) - 1);
+}
+
+static void send_favicon(int fd) {
+    char hdr[256];
+    int hlen = snprintf(hdr, sizeof(hdr),
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: image/svg+xml\r\n"
+                        "Content-Length: %zu\r\n"
+                        "Cache-Control: public, max-age=86400\r\n"
+                        "Connection: close\r\n\r\n",
+                        sizeof(FAVICON_SVG) - 1);
+    sse_write(fd, hdr, (size_t)hlen);
+    sse_write(fd, FAVICON_SVG, sizeof(FAVICON_SVG) - 1);
 }
 
 static void send_404(int fd) {
@@ -613,6 +649,9 @@ static void handle_client(int fd) {
 
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         send_html(fd);
+        close(fd);
+    } else if (strcmp(path, "/favicon.svg") == 0 || strcmp(path, "/favicon.ico") == 0) {
+        send_favicon(fd);
         close(fd);
     } else if (strcmp(path, "/events") == 0) {
         start_sse(fd); /* SSE socket retained in g_clients */
