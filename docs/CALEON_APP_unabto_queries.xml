@@ -1,0 +1,399 @@
+<?xml version="1.0"?>
+<unabto_queries
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="http://www.nabto.com/unabto/query_model.xsd">
+
+  <query name="room_list.json" description="Read room list." id="256">
+    <request>
+    </request>
+    <response format="json">
+      <list name="rooms">
+        <parameter name="name" type="raw"/>
+        <parameter name="type" type="raw"/>
+        <parameter name="temperature" type="raw"/>
+        <parameter name="humidity" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="room_state.json" description="Read and update room state. Values are ignored if empty." id="257">
+    <request>
+      <parameter name="id" type="uint16"/>
+      <parameter name="tdelta" type="int8"/>
+      <parameter name="vacation" type="raw"/>
+      <parameter name="season" type="raw"/>
+      <parameter name="mode" type="raw"/>
+      <parameter name="name" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="tset" type="raw"/>
+      <parameter name="vacation" type="raw"/>
+      <parameter name="season" type="raw"/>
+      <parameter name="mode" type="raw"/>
+      <parameter name="name" type="raw"/>
+    </response>
+  </query>
+
+  <query name="room_timer.json" description="Read and update timers. Updating if the list is not empty." id="258">
+    <request>
+      <parameter name="id" type="uint16"/>
+      <parameter name="type" type="uint8"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="bf0" type="uint32"/>
+      <parameter name="bf1" type="uint32"/>
+      <parameter name="bf2" type="uint32"/>
+    </request>
+    <response format="json">
+      <list name="timer">
+        <parameter name="value" type="uint32"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="timer_copy.json" description="Copy timers." id="259">
+    <request>
+      <parameter name="id" type="uint16"/>
+      <parameter name="type" type="uint8"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="mask" type="uint8"/>
+    </request>
+    <response format="json">
+      <list name="timer">
+        <parameter name="value" type="uint32"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="synch_flags.json" description="Synchronize features." id="260">
+    <request>
+    </request>
+    <response format="json">
+      <list name="synch">
+        <parameter name="flags" type="uint32"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="versions.json" description="Report firmware version, etc." id="261">
+    <request>
+    </request>
+    <response format="json">
+      <parameter name="firmware" type="raw"/>
+      <parameter name="nabto" type="raw"/>
+    </response>
+  </query>
+
+  <query name="message_log.json" description="Advanced message log." id="262">
+    <request>
+    </request>
+    <response format="json">
+      <list name="log">
+        <parameter name="dt" type="raw"/>
+        <parameter name="msg" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="action.json" description="get menu description as a result of a menu action, empty action and id mean root menu" id="512">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="action" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="id" type="raw"/>
+      <parameter name="title" type="raw"/>
+      <parameter name="back" type="raw"/>
+      <parameter name="forward" type="raw"/>
+      <parameter name="type" type="raw"/>
+    </response>
+  </query>
+
+  <query name="string_list.json" description="get menu details for a list menu type" id="513">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <list name="menu">
+        <parameter name="title" type="raw"/>
+        <parameter name="action" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="dynamic_list.json" description="get menu details for a dynamic list menu type" id="514">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="hint" type="raw"/>
+      <list name="menu">
+        <parameter name="icon" type="raw"/>
+        <parameter name="icon_text" type="raw"/>
+        <parameter name="title" type="raw"/>
+        <parameter name="action" type="raw"/>
+        <parameter name="highlighted" type="uint8"/>
+      </list>
+    </response>
+  </query>
+  
+  <query name="options.json" description="get menu details for an options menu type" id="515">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="hint" type="raw"/>
+      <parameter name="value" type="raw"/>
+      <parameter name="increase" type="raw"/>
+      <parameter name="decrease" type="raw"/>
+    </response>
+  </query>
+
+  <query name="timer.json" description="get menu details for a timer menu type" id="516">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="bf0" type="uint32"/>
+      <parameter name="bf1" type="uint32"/>
+      <parameter name="bf2" type="uint32"/>
+    </request>
+    <response format="json">
+      <list name="timer">
+        <parameter name="value" type="uint32"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="text.json" description="get menu details for a text menu type" id="517">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="value" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="value" type="raw"/>
+    </response>
+  </query>
+
+  <query name="information.json" description="get menu details for a static info menu type" id="518">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <list name="menu">
+        <parameter name="text" type="raw"/>
+        <parameter name="alignment" type="raw"/>
+        <parameter name="action" type="raw"/>
+        <parameter name="hold_action" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="binary_query.json" description="get menu details for a yes/no menu type" id="519">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <list name="hint">
+        <parameter name="line" type="raw"/>
+      </list>
+      <parameter name="value" type="raw"/>
+      <parameter name="yes" type="raw"/>
+      <parameter name="no" type="raw"/>
+    </response>
+  </query>
+
+ <query name="timer_menu_copy.json" description="timer menu copy to other days type" id="520">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="mask" type="uint8"/>
+    </request>
+    <response format="json">
+      <list name="timer">
+        <parameter name="value" type="uint32"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="system_date.json" description="Get and set system date" id="521">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="month" type="int8"/>
+      <parameter name="year" type="int16"/>
+    </request>
+    <response format="json">
+      <parameter name="day" type="int8"/>
+      <parameter name="month" type="int8"/>
+      <parameter name="year" type="int16"/>
+    </response>
+  </query>
+
+  <query name="system_date_2.json" description="Get and set system date" id="531">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="month" type="int8"/>
+      <parameter name="year" type="int16"/>
+    </request>
+    <response format="json">
+      <parameter name="day" type="int8"/>
+      <parameter name="month" type="int8"/>
+      <parameter name="year" type="int16"/>
+      <parameter name="hint" type="raw"/>
+    </response>
+  </query>
+
+  <query name="system_time.json" description="Get and set system time" id="522">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="hour" type="int8"/>
+      <parameter name="minute" type="int8"/>
+    </request>
+    <response format="json">
+      <parameter name="hour" type="int8"/>
+      <parameter name="minute" type="int8"/>
+    </response>
+  </query>
+
+  <query name="offset.json" description="get menu details for an offset menu type" id="523">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="hint" type="raw"/>
+      <list name="menu">
+        <parameter name="icon" type="raw"/>
+        <parameter name="icon_text" type="raw"/>
+        <parameter name="value" type="raw"/>
+        <parameter name="offset" type="raw"/>
+        <parameter name="increase" type="raw"/>
+        <parameter name="decrease" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="system_datetime.json" description="Get and set system datetime" id="524">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="month" type="int8"/>
+      <parameter name="year" type="int16"/>
+      <parameter name="hour" type="int8"/>
+      <parameter name="minute" type="int8"/>
+    </request>
+    <response format="json">
+      <parameter name="day" type="int8"/>
+      <parameter name="month" type="int8"/>
+      <parameter name="year" type="int16"/>
+      <parameter name="hour" type="int8"/>
+      <parameter name="minute" type="int8"/>
+    </response>
+  </query>
+
+  <query name="time_ranges.json" description="get menu details for a time range menu type" id="525">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <list name="timer">
+        <parameter name="start" type="uint16"/>
+        <parameter name="stop" type="uint16"/>
+      </list>
+    </request>
+    <response format="json">
+      <parameter name="day" type="int8"/>
+      <list name="ranges">
+        <parameter name="start" type="uint16"/>
+        <parameter name="stop" type="uint16"/>
+        <parameter name="title" type="raw"/>
+        <parameter name="hint" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="time_ranges_2.json" description="get menu details for a Start+Mode time range menu type" id="530">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <list name="timer">
+        <parameter name="start" type="uint16"/>
+        <parameter name="mode" type="int8"/>
+      </list>
+    </request>
+    <response format="json">
+      <parameter name="day" type="int8"/>
+      <list name="ranges">
+        <parameter name="start" type="uint16"/>
+        <parameter name="mode" type="int8"/>
+        <parameter name="title" type="raw"/>
+        <parameter name="hint" type="raw"/>
+      </list>
+      <list name="modes">
+        <parameter name="mode_id" type="int8"/>
+        <parameter name="mode_text" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="time_ranges_copy.json" description="time ranges copy to other days type" id="526">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="day" type="int8"/>
+      <parameter name="mask" type="uint8"/>
+    </request>
+    <response format="json">
+      <list name="timer">
+        <parameter name="value" type="uint16"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="action_2.json" description="get an extended menu description as a result of a menu action, empty action and id mean root menu" id="527">
+    <request>
+      <parameter name="id" type="raw"/>
+      <parameter name="action" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="id" type="raw"/>
+      <parameter name="title" type="raw"/>
+      <parameter name="action" type="raw"/>
+      <parameter name="hold_action" type="raw"/>
+      <parameter name="back" type="raw"/>
+      <parameter name="back_hold" type="raw"/>
+      <parameter name="forward" type="raw"/>
+      <parameter name="forward_hold" type="raw"/>
+      <parameter name="type" type="raw"/>
+    </response>
+  </query>
+
+  <query name="string_list_2.json" description="get menu details for an extended list menu type" id="528">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <list name="menu">
+        <parameter name="title" type="raw"/>
+        <parameter name="action" type="raw"/>
+        <parameter name="hold_action" type="raw"/>
+      </list>
+    </response>
+  </query>
+
+  <query name="dynamic_list_2.json" description="get menu details for an extended dynamic list menu type" id="529">
+    <request>
+      <parameter name="id" type="raw"/>
+    </request>
+    <response format="json">
+      <parameter name="hint" type="raw"/>
+      <list name="menu">
+        <parameter name="icon" type="raw"/>
+        <parameter name="icon_text" type="raw"/>
+        <parameter name="title" type="raw"/>
+        <parameter name="action" type="raw"/>
+        <parameter name="hold_action" type="raw"/>
+        <parameter name="highlighted" type="uint8"/>
+      </list>
+    </response>
+  </query>
+
+</unabto_queries>
+
