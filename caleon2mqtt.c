@@ -63,10 +63,10 @@ typedef struct {
     char debug_capture_all[256];     /* "debug.capture_all"     -- write every frame's trace here */
     char debug_capture_unknown[256]; /* "debug.capture_unknown" -- write only undecoded frames here */
 
-    int scbi_subscriber_id;          /* "scbi.subscriber_id" -- our id when sending; default 0xA5 */
+    int scbi_subscriber_id; /* "scbi.subscriber_id" -- our id when sending; default 0xA5 */
 
-    int poll_datetime_secs;          /* "polling.datetime"   -- 0 means disabled */
-    int poll_deviceinfo_secs;        /* "polling.deviceinfo" -- 0 means disabled */
+    int poll_datetime_secs;   /* "polling.datetime"   -- 0 means disabled */
+    int poll_deviceinfo_secs; /* "polling.deviceinfo" -- 0 means disabled */
 } config_t;
 
 static config_t g_cfg;
@@ -221,7 +221,7 @@ static int parse_duration_secs(const char *s) {
     bool seen_digit = false;
     for (; *s; s++) {
         if (*s >= '0' && *s <= '9') {
-            n         = n * 10 + (*s - '0');
+            n          = n * 10 + (*s - '0');
             seen_digit = true;
         } else {
             long mul = 0;
@@ -313,7 +313,7 @@ static int cfg_load(const char *path) {
             g_cfg.scbi_subscriber_id = sid->valueint & 0xFF;
         } else if (cJSON_IsString(sid)) {
             /* accept "0xA5" or "165" string form */
-            const char *str = sid->valuestring;
+            const char *str          = sid->valuestring;
             g_cfg.scbi_subscriber_id = (int)strtol(str, NULL, 0) & 0xFF;
         }
     }
@@ -488,7 +488,7 @@ static int can_send_controller_request(int sock, uint8_t our_sid, uint8_t fn, ui
     frame.can_id  = scbi_id(0 /*REQUEST*/, 0 /*CAN_FORMAT_0*/, fn, our_sid, 0x0B /*CONTROLLER*/) | CAN_EFF_FLAG;
     frame.can_dlc = 1;
     frame.data[0] = target;
-    ssize_t n = write(sock, &frame, sizeof(frame));
+    ssize_t n     = write(sock, &frame, sizeof(frame));
     if (n != (ssize_t)sizeof(frame)) {
         fprintf(stderr, "can: send fn=0x%02X target=0x%02X failed: %s\n", fn, target, strerror(errno));
         return -1;
@@ -897,7 +897,8 @@ static cJSON *decode_controller(const frame_t *f, const char **subtopic, bool *r
  * Two frames typically arrive in quick succession with a ~5s skew -- likely
  * two devices each broadcasting their own clock. */
 static cJSON *decode_system_datetime(const frame_t *f, const char **subtopic, bool *retain) {
-    DBGP(" ... SYSTEM_DATETIME (0x87): Function=0x%02X, MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
+    DBGP(" ... SYSTEM_DATETIME (0x87): Function=0x%02X, MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, f->message_type, msg_type_str(f->message_type),
+         f->subscriber_id);
     if (f->function_type != 0x00 || f->dlc < 8) {
         if (f->dlc > 0)
             print_payload_raw(f, "Payload");
