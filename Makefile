@@ -5,13 +5,14 @@ LDFLAGS ?=
 LIBS_MQTT = -lmosquitto -lcjson
 LIBS_WEB  = -lmosquitto -lcjson -lpthread
 
+TYPE	    ?= server
 PREFIX      ?= /usr/local
 BINDIR       = $(PREFIX)/bin
 SYSTEMDDIR  ?= /etc/systemd/system
 DEFAULTDIR  ?= /etc/default
 
 BINS     = caleon2mqtt caleon-web
-SERVICES = caleon2mqtt.service caleon-web.service
+SERVICES = $(TYPE)/caleon2mqtt.service $(TYPE)/caleon-web.service
 C_SRCS   = caleon2mqtt.c caleon-web.c
 JS_SRCS  = caleon-tui.js
 
@@ -51,7 +52,7 @@ define install_service
 	-systemctl stop $(1) 2>/dev/null || true
 	-systemctl disable $(1) 2>/dev/null || true
 	install -d $(DESTDIR)$(SYSTEMDDIR)
-	install -m 0644 $(1).service $(DESTDIR)$(SYSTEMDDIR)/$(1).service
+	install -m 0644 $(TYPE)/$(1).service $(DESTDIR)$(SYSTEMDDIR)/$(1).service
 	systemctl daemon-reload
 	systemctl enable $(1)
 	systemctl start $(1) || echo "Warning: failed to start $(1)"
@@ -68,7 +69,7 @@ install-caleon2mqtt-cfg: $(CFG_SRC)
 	install -d $(DESTDIR)$(DEFAULTDIR)
 	install -m 0644 $(CFG_SRC) $(DESTDIR)$(DEFAULTDIR)/caleon2mqtt
 
-install-caleon2mqtt-service: caleon2mqtt.service
+install-caleon2mqtt-service: $(TYPE)/caleon2mqtt.service
 	$(call install_service,caleon2mqtt)
 
 install-caleon2mqtt: install-caleon2mqtt-bin install-caleon2mqtt-cfg install-caleon2mqtt-service
@@ -90,7 +91,7 @@ install-caleon-web-bin: caleon-web
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 caleon-web $(DESTDIR)$(BINDIR)/caleon-web
 
-install-caleon-web-service: caleon-web.service
+install-caleon-web-service: $(TYPE)/caleon-web.service
 	$(call install_service,caleon-web)
 
 install-caleon-web: install-caleon-web-bin install-caleon-web-service
