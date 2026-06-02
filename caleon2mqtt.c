@@ -444,7 +444,7 @@ static void mqtt_publish(const char *subtopic, cJSON *payload, bool retain) {
     free(s);
 }
 
-/* ---------------------------------------------------------------- CAN open */
+/* ---------------------------------------------------------------- CAN */
 
 static int can_open(const char *iface) {
     int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
@@ -527,6 +527,7 @@ static const char *msg_type_str(uint8_t t) {
         return "UNKNOWN";
     }
 }
+
 /* Program Type table per docs/SOREL_CAN_bus_interface_rev11_COSTUMERS.pdf.
  * 0x8B is NOT in the rev-11 doc but the function-number layout (DLF_SENSOR,
  * DLF_RELAY, DLG_HYDRAULIK_CONFIG) is identical to 0x80 DATALOGGER_MONITOR --
@@ -630,6 +631,7 @@ static const char *controller_fn(uint8_t f) {
         return "UNKNOWN";
     }
 }
+
 static const char *remotesensor_fn(uint8_t f) {
     switch (f) {
     case 0x00:
@@ -672,6 +674,7 @@ static const char *remotesensor_fn(uint8_t f) {
         return "UNKNOWN";
     }
 }
+
 static const char *heatingcontrol_fn(uint8_t f) {
     switch (f) {
     case 0x00:
@@ -680,12 +683,15 @@ static const char *heatingcontrol_fn(uint8_t f) {
         return "DLF_SENSOR";
     case 0x02:
         return "DLF_RELAY";
+    case 0x05:
+        return "PANEL_SENSOR_OFFSET"; /* CALEON S panel writes its .1 temp / .1 humidity offset */
     case 0x08:
         return "DLG_HYDRAULIK_CONFIG";
     default:
         return "UNKNOWN";
     }
 }
+
 static const char *paramsync_fn(uint8_t f) {
     switch (f) {
     case 0x00:
@@ -789,9 +795,8 @@ static void print_prefix(const frame_t *f) {
     for (int i = 0; i < 8 - f->dlc && pos + 3 < sizeof(hex); i++)
         pos += snprintf(hex + pos, sizeof(hex) - pos, "  ");
     DBGP("%ld,%x,%d,%s", (long)f->ts, f->can_id, f->dlc, hex);
-    DBGP(" ... ProgramType=0x%02X SubscriberID=0x%02X FunctionType=0x%02X"
-         " ProtocolType=%d MessageType=%d",
-         f->program_type, f->subscriber_id, f->function_type, f->protocol_type, f->message_type);
+    DBGP(" ... ProgramType=0x%02X SubscriberID=0x%02X FunctionType=0x%02X ProtocolType=%d MessageType=%d", f->program_type, f->subscriber_id, f->function_type, f->protocol_type,
+         f->message_type);
 }
 
 /* print_payload_raw is the universal "decoder didn't know what to do with
@@ -825,10 +830,8 @@ static void json_common(cJSON *j, const frame_t *f) {
 
 static cJSON *decode_controller(const frame_t *f, const char **subtopic, bool *retain) {
     const char *fn = controller_fn(f->function_type);
-    DBGP(" ... CONTROLLER (0x0B): Function=0x%02X (%s),"
-         " MessageType=0x%X (%s), SubscriberID=0x%02X",
-         f->function_type, fn, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
-
+    DBGP(" ... CONTROLLER (0x0B): Function=0x%02X (%s), MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, fn, f->message_type, msg_type_str(f->message_type),
+         f->subscriber_id);
     cJSON *e = NULL;
     if (f->function_type == 0x14 && f->dlc >= 4) {
         /* DEVICE_INFO: OEM_ID, variant?, firmware version (LE uint16),
@@ -836,12 +839,10 @@ static cJSON *decode_controller(const frame_t *f, const char **subtopic, bool *r
          *   payload = C1 00 88 81 00 00 00 00
          * which decodes as OEM=0xC1 (CALEONbox), variant=0x00,
          * firmware = 0x8188 = 33160. */
-        uint8_t oem = f->data[0];
-        uint8_t var = f->data[1];
-        uint16_t fw = (uint16_t)(f->data[2] | (f->data[3] << 8));
-        DBGP(" ... DEVICE_INFO: OEM=0x%02X, Variant=0x%02X,"
-             " Firmware=%u (0x%04X)\n",
-             oem, var, fw, fw);
+        const uint8_t oem = f->data[0];
+        const uint8_t var = f->data[1];
+        const uint16_t fw = (uint16_t)(f->data[2] | (f->data[3] << 8));
+        DBGP(" ... DEVICE_INFO: OEM=0x%02X, Variant=0x%02X, Firmware=%u (0x%04X)\n", oem, var, fw, fw);
         e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "type", "device_info");
         cJSON_AddStringToObject(e, "function", fn);
@@ -852,12 +853,9 @@ static cJSON *decode_controller(const frame_t *f, const char **subtopic, bool *r
         *subtopic = "device";
         *retain   = true;
     } else if ((f->function_type == 0x01 || f->function_type == 0x08) && f->dlc >= 4) {
-        uint8_t dev_sub = f->data[0], dev_id = f->data[1];
-        uint8_t oem = f->data[2], var = f->data[3];
-        DBGP(" ... Payload: SubscriberID=0x%02X, DeviceID=0x%02X,"
-             " OEM_ID=0x%02X, DeviceVariant=0x%02X\n",
-             dev_sub, dev_id, oem, var);
-
+        const uint8_t dev_sub = f->data[0], dev_id = f->data[1];
+        const uint8_t oem = f->data[2], var = f->data[3];
+        DBGP(" ... Payload: SubscriberID=0x%02X, DeviceID=0x%02X, OEM_ID=0x%02X, DeviceVariant=0x%02X\n", dev_sub, dev_id, oem, var);
         e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "type", f->function_type == 0x01 ? "heartbeat" : "reset");
         cJSON_AddStringToObject(e, "function", fn);
@@ -874,7 +872,7 @@ static cJSON *decode_controller(const frame_t *f, const char **subtopic, bool *r
          * data[0] = target subscriber id (or 0 = broadcast/unspecified).
          * No MQTT event is emitted; marking it recognised keeps it out of
          * the capture_unknown log. */
-        uint8_t target = (f->dlc > 0) ? f->data[0] : 0;
+        const uint8_t target = (f->dlc > 0) ? f->data[0] : 0;
         DBGP(" ... Request: target=0x%02X\n", target);
     } else if (f->dlc > 0) {
         print_payload_raw(f, "Payload");
@@ -906,10 +904,9 @@ static cJSON *decode_system_datetime(const frame_t *f, const char **subtopic, bo
             DBGP("\n");
         return NULL;
     }
-    uint16_t year = (uint16_t)(f->data[0] | (f->data[1] << 8));
-    uint8_t mo = f->data[2], d = f->data[3], h = f->data[4], mi = f->data[5], s = f->data[6], dow = f->data[7];
+    const uint16_t year = (uint16_t)(f->data[0] | (f->data[1] << 8));
+    const uint8_t mo = f->data[2], d = f->data[3], h = f->data[4], mi = f->data[5], s = f->data[6], dow = f->data[7];
     DBGP(" ... DateTime: %04u-%02u-%02u %02u:%02u:%02u (dow=%u)\n", year, mo, d, h, mi, s, dow);
-
     cJSON *e = cJSON_CreateObject();
     cJSON_AddStringToObject(e, "type", "system_datetime");
     json_common(e, f);
@@ -928,20 +925,15 @@ static cJSON *decode_system_datetime(const frame_t *f, const char **subtopic, bo
     return e;
 }
 
-static cJSON *decode_paramsync(const frame_t *f, const char **subtopic, bool *retain) {
-    (void)subtopic;
-    (void)retain;
+static cJSON *decode_paramsync(const frame_t *f, __attribute__((unused)) const char **subtopic, __attribute__((unused)) bool *retain) {
     const char *fn = paramsync_fn(f->function_type);
-    DBGP(" ... PARAMETERSYNCCONFIG (0x90): Function=0x%02X (%s),"
-         " MessageType=0x%X (%s), SubscriberID=0x%02X",
-         f->function_type, fn, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
+    DBGP(" ... PARAMETERSYNCCONFIG (0x90): Function=0x%02X (%s), MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, fn, f->message_type, msg_type_str(f->message_type),
+         f->subscriber_id);
     if (f->function_type == 0x00 && f->dlc >= 2) {
         DBGP(" ... Payload: Source=0x%02X, Destination=0x%02X\n", f->data[0], f->data[1]);
     } else if (f->function_type == 0x01 && f->dlc >= 6) {
-        DBGP(" ... Payload: Source=0x%02X, Destination=0x%02X,"
-             " Family=0x%02X, Synchronize=0x%02X, Disconnect=0x%02X,"
-             " SelfTestDone=0x%02X\n",
-             f->data[0], f->data[1], f->data[2], f->data[3], f->data[4], f->data[5]);
+        DBGP(" ... Payload: Source=0x%02X, Destination=0x%02X, Family=0x%02X, Synchronize=0x%02X, Disconnect=0x%02X, SelfTestDone=0x%02X\n", f->data[0], f->data[1], f->data[2],
+             f->data[3], f->data[4], f->data[5]);
     } else if (f->dlc > 0) {
         print_payload_raw(f, "Payload");
     } else {
@@ -950,12 +942,144 @@ static cJSON *decode_paramsync(const frame_t *f, const char **subtopic, bool *re
     return NULL;
 }
 
+/* AVAILABLERESOURCES (0x8C) -- in the rev-11 doc this program is for
+ * sensor/relay enumeration with FuncType in {0, 1, 2, 0xFF}. In the wild
+ * the Caleon app also uses it as a parameter-write carrier from the
+ * CALEON S panel (SID=0x97) to the CALEONbox, with the ROOMSYNC payload
+ * shape (value[4] LE u32 | paramList[2] LE | instance[1] | paramID[1])
+ * and FuncType repurposed as the receiver subscriber id (same routing
+ * convention 0x91 ROOMSYNC documents).
+ *
+ * paramID -> meaning dictionary below is learned by toggling settings in
+ * the app and observing the byte that changes; extend as new IDs are
+ * discovered. instance is 0-based across configurable zone-relays (B..K),
+ * i.e. relay index minus 1 (A is the HC pump and has no per-zone params). */
+typedef enum {
+    PK_RAW = 0,
+    PK_ENUM,       /* small int, mapped to a string         */
+    PK_TEMP_DECI,  /* int16 decicelsius -> divide by 10     */
+    PK_SENSOR_REF, /* 4-byte 1-wire reference, see below    */
+} param_kind_t;
+
+typedef struct {
+    uint8_t param_id;
+    const char *name;
+    param_kind_t kind;
+    const char *const *enum_names;
+    int enum_n;
+} param_def_t;
+
+static const char *const enum_polarity[] = { "normal", "inverted" };
+static const char *const enum_seizing[]  = { "off", "daily", "weekly" };
+
+static const param_def_t PARAM_DEFS[] = {
+    { 0x01, "polarity", PK_ENUM, enum_polarity, 2 },           { 0x08, "seizing_protection", PK_ENUM, enum_seizing, 3 }, { 0x11, "winter_summer_temp", PK_TEMP_DECI, NULL, 0 },
+    { 0x12, "eco_winter_summer_temp", PK_TEMP_DECI, NULL, 0 }, { 0x1C, "floor_sensor", PK_SENSOR_REF, NULL, 0 },
+};
+
+static const param_def_t *param_def(uint8_t pid) {
+    for (size_t i = 0; i < sizeof(PARAM_DEFS) / sizeof(PARAM_DEFS[0]); i++)
+        if (PARAM_DEFS[i].param_id == pid)
+            return &PARAM_DEFS[i];
+    return NULL;
+}
+
+static cJSON *decode_availableresources(const frame_t *f, const char **subtopic, bool *retain) {
+    DBGP(" ... AVAILABLERESOURCES (0x8C): Function=0x%02X, MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, f->message_type, msg_type_str(f->message_type),
+         f->subscriber_id);
+    /* Only the routed parameter-write variant is decoded here: 8-byte
+     * payload, MSG_RESPONSE. The documented efr_sensor/efr_relay paths use
+     * FuncType in {0,1,2,0xFF} -- those still print raw bytes and emit no
+     * event (not seen yet on this bus). */
+    if (f->message_type != 2 || f->dlc < 8 || f->function_type < 0x10) {
+        if (f->dlc > 0)
+            print_payload_raw(f, "Payload");
+        else
+            DBGP("\n");
+        return NULL;
+    }
+    const uint32_t value_raw = (uint32_t)f->data[0] | ((uint32_t)f->data[1] << 8) | ((uint32_t)f->data[2] << 16) | ((uint32_t)f->data[3] << 24);
+    const uint16_t plist     = (uint16_t)(f->data[4] | (f->data[5] << 8));
+    const uint8_t inst       = f->data[6];
+    const uint8_t pid        = f->data[7];
+    /* Map instance (0-based across configurable zone-relays) back to the
+     * hc_relays config entry: instance 0 -> hc_relay 0x01, etc. Same trick
+     * gives a single-letter zone for compact display. */
+    const char *relay_name = cfg_lookup_u8(g_cfg.hc_relays, (uint8_t)(inst + 1));
+    const char zone[2]     = { inst > ('Z' - 'B') ? '?' : (char)('B' + inst), 0 };
+    const param_def_t *pd  = param_def(pid);
+    const char *pname      = pd ? pd->name : NULL;
+    DBGP(" ... Param: zone=%s (inst=%u) list=0x%04X pid=0x%02X (%s) value_raw=0x%08X\n", zone, inst, plist, pid, pname ? pname : "unknown", value_raw);
+    cJSON *e = cJSON_CreateObject();
+    cJSON_AddStringToObject(e, "type", "param");
+    json_common(e, f);
+    /* FuncType is the receiver subscriber id in this routed variant. */
+    cJSON_AddNumberToObject(e, "receiver_id", f->function_type);
+    const char *rn = cfg_lookup_u8(g_cfg.subscribers, f->function_type);
+    if (rn)
+        cJSON_AddStringToObject(e, "receiver_name", rn);
+    cJSON_AddNumberToObject(e, "instance", inst);
+    cJSON_AddStringToObject(e, "zone", zone);
+    if (relay_name)
+        cJSON_AddStringToObject(e, "relay_name", relay_name);
+    cJSON_AddNumberToObject(e, "param_list", plist);
+    cJSON_AddNumberToObject(e, "param_id", pid);
+    if (pname)
+        cJSON_AddStringToObject(e, "param_name", pname);
+    cJSON_AddNumberToObject(e, "value_raw", (double)value_raw);
+    if (pd) {
+        switch (pd->kind) {
+        case PK_ENUM:
+            if ((int)value_raw < pd->enum_n)
+                cJSON_AddStringToObject(e, "value", pd->enum_names[value_raw]);
+            break;
+        case PK_TEMP_DECI: {
+            cJSON_AddNumberToObject(e, "value", ((int16_t)(value_raw & 0xFFFF)) / 10.0);
+            cJSON_AddStringToObject(e, "unit",
+                                    "\xC2\xB0"
+                                    "C");
+            break;
+        }
+        case PK_SENSOR_REF:
+            if (value_raw == 0xFFFFFFFEu) {
+                cJSON_AddStringToObject(e, "value", "none");
+            } else {
+                /* byte 0: bits[7:5] = slot-1, bits[4:0] = bus subtype (0x02
+                 * observed for 1-wire). byte 1 = bus type code, byte 2 =
+                 * host subscriber id (the user-facing "181" in "181.x"). */
+                uint8_t slot = (uint8_t)(((f->data[0]) >> 5) + 1);
+                char ref[16];
+                snprintf(ref, sizeof(ref), "%u.%u", f->data[2], slot);
+                cJSON_AddStringToObject(e, "value", ref);
+                cJSON_AddNumberToObject(e, "sensor_host", f->data[2]);
+                cJSON_AddNumberToObject(e, "sensor_slot", slot);
+                cJSON_AddNumberToObject(e, "sensor_bus", f->data[1]);
+            }
+            break;
+        case PK_RAW:
+        default:
+            break;
+        }
+    }
+    /* Per-(zone, paramID) retained subtopic so subscribers see the latest
+     * value for each setting after reconnect/restart. Falls back to a
+     * generic numeric path if either side is unknown. */
+    static char st[64];
+    if (relay_name && pname)
+        snprintf(st, sizeof(st), "param/%s/%s", relay_name, pname);
+    else if (pname)
+        snprintf(st, sizeof(st), "param/i%u/%s", inst, pname);
+    else
+        snprintf(st, sizeof(st), "param/i%u/p%02X", inst, pid);
+    *subtopic = st;
+    *retain   = true;
+    return e;
+}
+
 static cJSON *decode_remotesensor(const frame_t *f, const char **subtopic, bool *retain) {
     const char *fn = remotesensor_fn(f->function_type);
-    DBGP(" ... REMOTESENSOR (0x%02X): Function=0x%02X (%s),"
-         " MessageType=0x%X (%s), SubscriberID=0x%02X",
-         f->program_type, f->function_type, fn, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
-
+    DBGP(" ... REMOTESENSOR (0x%02X): Function=0x%02X (%s), MessageType=0x%X (%s), SubscriberID=0x%02X", f->program_type, f->function_type, fn, f->message_type,
+         msg_type_str(f->message_type), f->subscriber_id);
     if (f->message_type == 0) {
         DBGP(" ... Request: No payload expected\n");
         return NULL;
@@ -967,23 +1091,16 @@ static cJSON *decode_remotesensor(const frame_t *f, const char **subtopic, bool 
             DBGP("\n");
         return NULL;
     }
-
-    int16_t value = (int16_t)((f->data[1] << 8) | f->data[0]);
-    uint8_t vc    = f->data[2];
-    uint8_t ct    = f->data[3];
-    uint8_t ridx  = (f->dlc == 6) ? f->data[4] : 0;
-    uint8_t rtyp  = (f->dlc == 6) ? f->data[5] : 0;
-
+    const int16_t value = (int16_t)((f->data[1] << 8) | f->data[0]);
+    const uint8_t vc    = f->data[2];
+    const uint8_t ct    = f->data[3];
+    const uint8_t ridx  = (f->dlc == 6) ? f->data[4] : 0;
+    const uint8_t rtyp  = (f->dlc == 6) ? f->data[5] : 0;
     if (f->dlc == 6)
-        DBGP(" ... CALEON Response: Value=0x%04X (%d),"
-             " VirtualCircuit=0x%02X, ControllerType=0x%02X,"
-             " RoomIndex=0x%02X, RoomType=0x%02X\n",
-             (uint16_t)value, value, vc, ct, ridx, rtyp);
+        DBGP(" ... CALEON Response: Value=0x%04X (%d), VirtualCircuit=0x%02X, ControllerType=0x%02X, RoomIndex=0x%02X, RoomType=0x%02X\n", (uint16_t)value, value, vc, ct, ridx,
+             rtyp);
     else
-        DBGP(" ... Response: Value=0x%04X (%d),"
-             " VirtualCircuit=0x%02X, ControllerType=0x%02X\n",
-             (uint16_t)value, value, vc, ct);
-
+        DBGP(" ... Response: Value=0x%04X (%d), VirtualCircuit=0x%02X, ControllerType=0x%02X\n", (uint16_t)value, value, vc, ct);
     cJSON *e = cJSON_CreateObject();
     cJSON_AddStringToObject(e, "type", "sensor");
     cJSON_AddStringToObject(e, "function", fn);
@@ -1020,11 +1137,9 @@ static cJSON *decode_remotesensor(const frame_t *f, const char **subtopic, bool 
     return e;
 }
 
-static cJSON *decode_namedsensor(const frame_t *f, const char **subtopic, bool *retain) {
-    (void)retain;
-    DBGP(" ... NAMEDSENSOR (0x%02X): Function=0x%02X,"
-         " MessageType=0x%X (%s), SubscriberID=0x%02X",
-         f->program_type, f->function_type, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
+static cJSON *decode_namedsensor(const frame_t *f, const char **subtopic, __attribute__((unused)) bool *retain) {
+    DBGP(" ... NAMEDSENSOR (0x%02X): Function=0x%02X, MessageType=0x%X (%s), SubscriberID=0x%02X", f->program_type, f->function_type, f->message_type,
+         msg_type_str(f->message_type), f->subscriber_id);
     if (f->message_type == 0) {
         DBGP(" ... Request: No payload expected\n");
         return NULL;
@@ -1036,7 +1151,7 @@ static cJSON *decode_namedsensor(const frame_t *f, const char **subtopic, bool *
             DBGP("\n");
         return NULL;
     }
-    int16_t value = (int16_t)((f->data[1] << 8) | f->data[0]);
+    const int16_t value = (int16_t)((f->data[1] << 8) | f->data[0]);
     DBGP(" ... Response: Value=0x%04X (%d)\n", (uint16_t)value, value);
     cJSON *e = cJSON_CreateObject();
     cJSON_AddStringToObject(e, "type", "named_sensor");
@@ -1082,25 +1197,19 @@ static cJSON *decode_namedsensor(const frame_t *f, const char **subtopic, bool *
  *
  * Function 0x08 DLG_HYDRAULIK_CONFIG: hydraulic-scheme descriptor; opaque.
  */
-static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, bool *retain) {
-    (void)retain;
+static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, __attribute__((unused)) bool *retain) {
     const char *fn = heatingcontrol_fn(f->function_type);
-    DBGP(" ... HEATINGCONTROL (0x8B): Function=0x%02X (%s),"
-         " MessageType=0x%X (%s), SubscriberID=0x%02X",
-         f->function_type, fn, f->message_type, msg_type_str(f->message_type), f->subscriber_id);
-
+    DBGP(" ... HEATINGCONTROL (0x8B): Function=0x%02X (%s), MessageType=0x%X (%s), SubscriberID=0x%02X", f->function_type, fn, f->message_type, msg_type_str(f->message_type),
+         f->subscriber_id);
     cJSON *e = NULL;
     if (f->function_type == 0x01 && f->dlc >= 3) {
-        uint8_t sno   = f->data[0];
-        int16_t value = (int16_t)((f->data[2] << 8) | f->data[1]);
-        uint8_t styp  = (f->dlc >= 4) ? f->data[3] : 0;
-        DBGP(" ... Sensor: Number=0x%02X, Value=0x%04X (%d),"
-             " Type=0x%02X",
-             sno, (uint16_t)value, value, styp);
+        const uint8_t sno   = f->data[0];
+        const int16_t value = (int16_t)((f->data[2] << 8) | f->data[1]);
+        const uint8_t styp  = (f->dlc >= 4) ? f->data[3] : 0;
+        DBGP(" ... Sensor: Number=0x%02X, Value=0x%04X (%d), Type=0x%02X", sno, (uint16_t)value, value, styp);
         if (f->dlc >= 8)
             DBGP(", Flags=0x%02X", f->data[7]);
         DBGP("\n");
-
         e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "type", "hc_sensor");
         cJSON_AddStringToObject(e, "function", fn);
@@ -1115,7 +1224,7 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
          * Live readings arrive on the 0x83 REMOTESENSOR channel. Mark
          * the well-known sentinels as not-present; only emit a scaled
          * value if we ever see something other than 256/6400/2304. */
-        bool slot_sentinel = (value == 256 || value == 6400 || value == 2304);
+        const bool slot_sentinel = (value == 256 || value == 6400 || value == 2304);
         if (styp == 0 || slot_sentinel) {
             cJSON_AddNullToObject(e, "value");
             cJSON_AddBoolToObject(e, "present", false);
@@ -1166,19 +1275,16 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
          * flag, exact meaning unknown). The actual on/off state must
          * live in one of bytes 4-7 which are all zero while relays are
          * off -- we'll see which when a relay fires. */
-        uint8_t rno   = f->data[0];
-        uint8_t flag  = f->data[1];
-        char label[3] = { (char)f->data[2], (f->dlc >= 4 && f->data[3]) ? (char)f->data[3] : '\0', '\0' };
-        DBGP(" ... Relay: Number=0x%02X, Flag=0x%02X,"
-             " Label=\"%s\"",
-             rno, flag, label);
+        const uint8_t rno   = f->data[0];
+        const uint8_t flag  = f->data[1];
+        const char label[3] = { (char)f->data[2], (f->dlc >= 4 && f->data[3]) ? (char)f->data[3] : '\0', '\0' };
+        DBGP(" ... Relay: Number=0x%02X, Flag=0x%02X, Label=\"%s\"", rno, flag, label);
         if (f->dlc > 4) {
             DBGP(", Extra=");
             for (int i = 4; i < f->dlc; i++)
                 DBGP("%02X", f->data[i]);
         }
         DBGP("\n");
-
         e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "type", "hc_relay");
         cJSON_AddStringToObject(e, "function", fn);
@@ -1196,8 +1302,77 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
         if (n)
             cJSON_AddStringToObject(e, "name", n);
         *subtopic = "hc/relay";
-    } else if (f->function_type == 0x00) {
-        print_payload_raw(f, "Status");
+    } else if (f->function_type == 0x00 || f->function_type == 0x05) {
+        /* 0x8B fn=0x00 (General_Status) and fn=0x05 (offset write) share a
+         * common 3-byte envelope on the local-sensor channels:
+         *   data[0] = slot       (0-based; on the panel always 0)
+         *   data[1] = block      0x02 = CALEON S onboard panel sensor
+         *                        0x05 = CALEONbox 1-wire bus sensor
+         *   data[2] = field      0x02 = temp, 0x03 = humidity
+         * For fn=0x00 (sensor reading):
+         *   data[3..5] = LE u24 Q16.8 fixed-point in deci-units; /256 = int
+         *                decicelsius/decipercent, /2560 = real value.
+         *   data[6..7] = 0
+         * For fn=0x05 (offset write):
+         *   data[3]    = 0
+         *   data[4]    = signed int8 offset in 0.1-units (+0.1 -> 0x01,
+         *                0.0 -> 0x00, -0.1 -> 0xFF predicted)
+         *   data[5..7] = 0
+         * General_Status appears in other shapes too (byte 1 != 0x02/0x05);
+         * those still print as raw. */
+        const bool envelope_ok = f->dlc >= 5 && (f->data[1] == 0x02 || f->data[1] == 0x05) && (f->data[2] == 0x02 || f->data[2] == 0x03);
+        if (!envelope_ok) {
+            if (f->function_type == 0x00)
+                print_payload_raw(f, "Status");
+            else if (f->dlc > 0)
+                print_payload_raw(f, "Payload");
+            else
+                DBGP("\n");
+        } else {
+            const uint8_t slot   = f->data[0];
+            const uint8_t block  = f->data[1];
+            const uint8_t field  = f->data[2];
+            const char *source   = (block == 0x02) ? "panel" : "onewire";
+            const char *fnm      = (field == 0x02) ? "temp" : "humidity";
+            const char *unit     = (field == 0x02) ? "\xC2\xB0"
+                                                     "C"
+                                                   : "%";
+            const bool is_offset = (f->function_type == 0x05);
+            e                    = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "type", is_offset ? "local_offset" : "local_sensor");
+            cJSON_AddStringToObject(e, "function", fn);
+            json_common(e, f);
+            cJSON_AddStringToObject(e, "source", source);
+            cJSON_AddNumberToObject(e, "block", block);
+            cJSON_AddNumberToObject(e, "slot", slot);
+            cJSON_AddNumberToObject(e, "field_id", field);
+            cJSON_AddStringToObject(e, "field", fnm);
+            cJSON_AddStringToObject(e, "unit", unit);
+            if (is_offset) {
+                const int8_t off_deci = (int8_t)f->data[4];
+                const double off      = off_deci / 10.0;
+                DBGP(" ... LocalOffset: source=%s slot=%u field=%s offset=%+d (%+.1f%s)\n", source, slot, fnm, off_deci, off, unit);
+                cJSON_AddNumberToObject(e, "offset_raw", off_deci);
+                cJSON_AddNumberToObject(e, "offset", off);
+            } else {
+                const uint32_t fixed = (uint32_t)f->data[3] | ((uint32_t)f->data[4] << 8) | ((uint32_t)f->data[5] << 16);
+                const double value   = fixed / 2560.0;
+                DBGP(" ... LocalSensor: source=%s slot=%u field=%s raw=0x%06X value=%.3f%s\n", source, slot, fnm, fixed, value, unit);
+                cJSON_AddNumberToObject(e, "value_raw", fixed);
+                cJSON_AddNumberToObject(e, "value", value);
+            }
+            /* Topic: keep panel/sensor/<field> flat (panel slot is always
+             * 0 in practice), use 1-based slot for 1-wire to match the
+             * "181.<slot>" notation in the Caleon app. */
+            static char st[64];
+            const char *role = is_offset ? "offset" : "sensor";
+            if (block == 0x02)
+                snprintf(st, sizeof(st), "%s/%s/%s", source, role, fnm);
+            else
+                snprintf(st, sizeof(st), "%s/%s/%u/%s", source, role, (unsigned)(slot + 1), fnm);
+            *subtopic = st;
+            *retain   = true;
+        }
     } else if (f->function_type == 0x08 && f->dlc >= 4) {
         /* DLG_HYDRAULIK_CONFIG: same ASCII-label trick as DLF_RELAY --
          * bytes 2..3 carry the input tag (observed "N2" / "N5"). byte 0
@@ -1205,9 +1380,9 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
          * configured parameter data -- bytes 4..6 zero in our capture,
          * byte 7 a small integer (e.g. 0x19 = 25 -- possibly a duty
          * setpoint, TBC). Surfaced so it can be diffed across captures. */
-        uint8_t cno   = f->data[0];
-        uint8_t flag  = f->data[1];
-        char label[3] = { (char)f->data[2], (f->data[3]) ? (char)f->data[3] : '\0', '\0' };
+        const uint8_t cno   = f->data[0];
+        const uint8_t flag  = f->data[1];
+        const char label[3] = { (char)f->data[2], (f->data[3]) ? (char)f->data[3] : '\0', '\0' };
         DBGP(" ... Config: Number=0x%02X, Flag=0x%02X, Label=\"%s\"", cno, flag, label);
         if (f->dlc > 4) {
             DBGP(", Extra=");
@@ -1215,7 +1390,6 @@ static cJSON *decode_heatingcontrol(const frame_t *f, const char **subtopic, boo
                 DBGP("%02X", f->data[i]);
         }
         DBGP("\n");
-
         e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "type", "hc_config");
         cJSON_AddStringToObject(e, "function", fn);
@@ -1254,6 +1428,8 @@ static cJSON *decode(const frame_t *f, const char **subtopic, bool *retain) {
         return decode_system_datetime(f, subtopic, retain);
     case 0x8B:
         return decode_heatingcontrol(f, subtopic, retain);
+    case 0x8C:
+        return decode_availableresources(f, subtopic, retain);
     case 0x90:
         return decode_paramsync(f, subtopic, retain);
     default:
