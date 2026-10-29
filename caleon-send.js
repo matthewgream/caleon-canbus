@@ -129,7 +129,7 @@ function usage() {
     console.error(`Usage: caleon-send.js [opts] <cmd> [<cmd> ...]
 
 Options:
-  -i, --iface IFACE     CAN interface (default vcan0)
+  -i, --iface IFACE     CAN interface (default can0)
   -s, --sender ID       our subscriber id (default 0xA5, currently unused on this bus)
   -t, --target ID       target controller id (default 0x00 = unspecified);
                         for ar_read_param: this is the receiver, encoded as FuncType
@@ -151,7 +151,7 @@ Watch for responses with one of:
 function main() {
     const argv = process.argv.slice(2);
     const opts = {
-        iface: 'vcan0',
+        iface: 'can0',
         sender: 0xa5,
         target: 0x00,
         paramId: 0x11,

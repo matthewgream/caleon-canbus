@@ -1,5 +1,5 @@
 CC      ?= gcc
-CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
+CFLAGS  ?= -O3 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS ?=
 
 LIBS_MQTT = -lmosquitto -lcjson
